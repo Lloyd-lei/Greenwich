@@ -104,6 +104,19 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
                 fw[t, i] = data.xpos[b]
         off = stance_offsets(fw)
 
+    # camera: when the motion travels, look at the path's midpoint from the
+    # SIDE (azimuth perpendicular to the net displacement) so the walk crosses
+    # the frame laterally — head-on, a 60 cm walk reads as treadmill.
+    span = off.max(0) - off.min(0)
+    travel = float(np.linalg.norm(off[-1]))
+    if travel > 0.25 and not follow:
+        mid = (off.max(0) + off.min(0)) / 2.0
+        cam.lookat[0], cam.lookat[1] = mid
+        heading = np.degrees(np.arctan2(off[-1, 1] - off[0, 1],
+                                        off[-1, 0] - off[0, 0]))
+        cam.azimuth = heading + 90.0
+        cam.distance = max(3.1 * h0, 1.9 * float(np.linalg.norm(span)))
+
     # pass 2 — render with the walk
     rend = mj.Renderer(model, height=height, width=width)
     frames = np.zeros((tr.frames, height, width, 3), np.uint8)
