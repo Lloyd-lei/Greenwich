@@ -40,6 +40,13 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
             jid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
             if jid >= 0:
                 tab[j, k] = int(model.jnt_qposadr[jid])
+    # the attached mesh MJCF may carry more/other joints than the descriptor
+    # the trace was built with (e.g. h1 with hands vs the 20-joint cache spec);
+    # map the trace's q columns onto the mesh's slots BY JOINT NAME
+    src_of = list(range(spec.J))
+    if getattr(tr, "joint_names", None):
+        lut = {n: i for i, n in enumerate(tr.joint_names)}
+        src_of = [lut.get(n, -1) for n in spec.joint_names]
     roots = [int(model.jnt_qposadr[j]) for j in range(model.njnt)
              if model.jnt_type[j] == mj.mjtJoint.mjJNT_FREE]
     root_adr = roots[0] if roots else -1
@@ -61,9 +68,12 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
             data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
                 AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
         for j in range(spec.J):
+            sj = src_of[j]
+            if sj < 0 or sj >= tr.q.shape[1]:
+                continue
             for k in range(3):
                 if tab[j, k] >= 0:
-                    data.qpos[tab[j, k]] = tr.q[t, j, k]
+                    data.qpos[tab[j, k]] = tr.q[t, sj, k]
         mj.mj_forward(model, data)
         for i, gid in enumerate(gids):
             pos[t, i] = data.geom_xpos[gid]

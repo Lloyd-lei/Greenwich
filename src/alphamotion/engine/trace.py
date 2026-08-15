@@ -24,6 +24,7 @@ class MotionTrace:
     title: str = ""
     target: str = ""
     tokens: np.ndarray | None = None      # the 32 rainbow codes, when known
+    joint_names: list | None = None       # q columns, for name-based render mapping
 
     def __post_init__(self):
         T = len(self.q)
@@ -41,6 +42,8 @@ class MotionTrace:
         extra = {}
         if self.tokens is not None:
             extra["tokens"] = np.asarray(self.tokens, np.int32)
+        if self.joint_names is not None:
+            extra["joint_names"] = np.asarray(self.joint_names)
         np.savez_compressed(path, q=self.q, rootR=self.rootR, gp=self.gp,
                             stage=self.stage.astype(np.int32),
                             fps=np.float32(self.fps),
@@ -58,4 +61,6 @@ class MotionTrace:
                    fps=float(d["fps"]),
                    title=str(d["title"]) if "title" in d else "",
                    target=str(d["target"]) if "target" in d else "",
-                   tokens=d["tokens"] if "tokens" in d else None)
+                   tokens=d["tokens"] if "tokens" in d else None,
+                   joint_names=[str(x) for x in d["joint_names"]]
+                   if "joint_names" in d else None)

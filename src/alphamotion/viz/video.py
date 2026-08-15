@@ -19,7 +19,7 @@ from ..engine.trace import MotionTrace
 AX = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], np.float64)  # Y-up -> Z-up
 
 
-def render_trace(trace: MotionTrace, xml: str, body: str,
+def render_trace(tr: MotionTrace, xml: str, body: str,
                  width: int = 640, height: int = 560) -> np.ndarray:
     setup_gl_backend()
     import mujoco as mj
@@ -37,6 +37,13 @@ def render_trace(trace: MotionTrace, xml: str, body: str,
             jid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
             if jid >= 0:
                 tab[j, k] = int(model.jnt_qposadr[jid])
+    # the attached mesh MJCF may carry more/other joints than the descriptor
+    # the trace was built with (e.g. h1 with hands vs the 20-joint cache spec);
+    # map the trace's q columns onto the mesh's slots BY JOINT NAME
+    src_of = list(range(spec.J))
+    if getattr(tr, "joint_names", None):
+        lut = {n: i for i, n in enumerate(tr.joint_names)}
+        src_of = [lut.get(n, -1) for n in spec.joint_names]
     roots = [int(model.jnt_qposadr[j]) for j in range(model.njnt)
              if model.jnt_type[j] == mj.mjtJoint.mjJNT_FREE]
     root_adr = roots[0] if roots else -1
@@ -48,18 +55,21 @@ def render_trace(trace: MotionTrace, xml: str, body: str,
     cam.distance, cam.elevation, cam.azimuth = 3.1 * h0, -10, 160
 
     rend = mj.Renderer(model, height=height, width=width)
-    frames = np.zeros((trace.frames, height, width, 3), np.uint8)
-    for t in range(trace.frames):
+    frames = np.zeros((tr.frames, height, width, 3), np.uint8)
+    for t in range(tr.frames):
         data.qpos[:] = model.qpos0
         if root_adr >= 0:
-            pm = trace.gp[t] @ AX / 100.0
+            pm = tr.gp[t] @ AX / 100.0
             data.qpos[root_adr:root_adr + 3] = [0, 0, -float(pm[:, 2].min())]
             data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
-                AX.T @ trace.rootR[t] @ AX).as_quat(scalar_first=True)
+                AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
         for j in range(spec.J):
+            sj = src_of[j]
+            if sj < 0 or sj >= tr.q.shape[1]:
+                continue
             for k in range(3):
                 if tab[j, k] >= 0:
-                    data.qpos[tab[j, k]] = trace.q[t, j, k]
+                    data.qpos[tab[j, k]] = tr.q[t, sj, k]
         mj.mj_forward(model, data)
         rend.update_scene(data, cam)
         frames[t] = rend.render()

@@ -27,6 +27,33 @@ from .schemas import JumpRequest, PlayRequest, Segment, TimelineRequest
 
 FRONTEND = Path(__file__).parent.parent / "assets" / "frontend"
 
+_viewers: dict[int, object] = {}          # port -> subprocess.Popen
+
+
+def _launch_viewer(trace_path: Path, xml: str, body: str) -> str | None:
+    """Per-result viser viewer from the configured port pool."""
+    import subprocess
+    import sys
+
+    from ..config import CONFIG
+    lo, hi = CONFIG.viewer_ports
+    for port, proc in list(_viewers.items()):
+        if proc.poll() is not None:
+            _viewers.pop(port)
+    free = [p for p in range(lo, hi) if p not in _viewers]
+    if not free:
+        oldest = next(iter(_viewers))
+        _viewers.pop(oldest).terminate()
+        free = [oldest]
+    port = free[0]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "alphamotion.viz.viewer", "--trace",
+         str(trace_path), "--xml", xml, "--body", body, "--port", str(port)],
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True)
+    _viewers[port] = proc
+    return f"http://127.0.0.1:{port}/"
+
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AlphaMotion", version="0.1.0")
@@ -195,7 +222,8 @@ def create_app() -> FastAPI:
         trace = MotionTrace(q=q.cpu().numpy(), rootR=rootR, gp=gp,
                             stage=stage, fps=fps, title=mid_title,
                             target=target_body,
-                            tokens=tok_final.cpu().numpy())
+                            tokens=tok_final.cpu().numpy(),
+                            joint_names=list(emb.spec.joint_names))
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family_of(prompt or mid_title)
@@ -236,6 +264,14 @@ def create_app() -> FastAPI:
                     s.add(Asset(motion_id=motion_id, kind="mp4",
                                 path=str(results_dir() / mp4)))
                     s.commit()
+        if emb.xml and Path(emb.xml).exists():
+            try:
+                out["viewer"] = _launch_viewer(tp, emb.xml, target_body)
+            except Exception:  # noqa: BLE001 — viewer is a bonus, not the job
+                pass
+        else:
+            out["viewer_note"] = ("no mesh attached for this body; add it to "
+                                  "robot_meshes.json to light up rendering")
         return out
 
     def _try_render(trace_path: Path, body: str) -> str | None:

@@ -44,13 +44,22 @@ def user_names() -> list[str]:
                   for p in user_dir().glob("*_spec.npz"))
 
 
+def mesh_map() -> dict:
+    """User-attached MJCF paths for bundled bodies (vendor meshes are not
+    redistributable, so this lives in data_dir as editable runtime config)."""
+    import json
+    p = data_dir() / "robot_meshes.json"
+    return json.loads(p.read_text()) if p.exists() else {}
+
+
 def load(name: str) -> Embodiment:
     root = assets_root() / "embodiments"
     if (root / f"{name}_spec.npz").exists():
         spec, dof, rest, qn, xml = build_from_cache(root, name)
         meta = _meta(root, name)
+        xml = xml or meta.get("xml") or mesh_map().get(name)
         return Embodiment(name, "bundled", spec, dof, rest,
-                          qn or meta.get("qnames"), xml or meta.get("xml"))
+                          qn or meta.get("qnames"), xml)
     u = user_dir()
     if (u / f"{name}_spec.npz").exists():
         spec, dof, rest, qn, xml = build_from_cache(u, name)
