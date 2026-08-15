@@ -15,7 +15,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import (FastAPI, File, HTTPException, UploadFile,
+                     WebSocket, WebSocketDisconnect)
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -457,15 +458,96 @@ def create_app() -> FastAPI:
                  "trace": Path(m.trace_path).name}
                 for m in rows]}
 
+    # ------------------------------------------------- viser proxy ----------
+    # The viewport must survive ANY single-port tunnel (the browser may only
+    # forward the gateway's port). All viser traffic — static client + the
+    # msgpack websocket — is therefore proxied through the gateway itself:
+    #   /viewer/<assets>  -> http://127.0.0.1:<viser>/<assets>
+    #   /viser-ws         -> ws://127.0.0.1:<viser>/
+    # and the iframe loads /viewer/?websocket=ws(s)://<host>/viser-ws.
+    # NOTE: WebSocket must be importable from THIS MODULE's globals — with
+    # `from __future__ import annotations` FastAPI resolves the string
+    # annotation against module scope; a function-local import made it fall
+    # back to "query parameter" and 403 every handshake.
+    import httpx
+
+    @app.get("/viewer/{path:path}")
+    async def viewer_proxy(path: str):
+        from fastapi.responses import Response
+        from ..config import CONFIG
+        url = f"http://127.0.0.1:{CONFIG.viewer_ports[0]}/{path or ''}"
+        async with httpx.AsyncClient() as client:
+            r = await client.get(url)
+        return Response(content=r.content,
+                        media_type=r.headers.get("content-type"))
+
+    @app.websocket("/viser-ws")
+    async def viser_ws(ws: WebSocket):
+        import websockets
+
+        from ..config import CONFIG
+        # viser carries its client version in the websocket SUBPROTOCOL and
+        # rejects 'unknown' — forward the client's offer upstream, then accept
+        # the browser with whatever viser negotiated
+        offered = ws.scope.get("subprotocols") or []
+        up = await websockets.connect(
+            f"ws://127.0.0.1:{CONFIG.viewer_ports[0]}/",
+            subprotocols=offered or None, max_size=None)
+        await ws.accept(subprotocol=up.subprotocol)
+        try:
+            if True:
+                async def pump_up():
+                    while True:
+                        msg = await ws.receive()
+                        if msg.get("type") == "websocket.disconnect":
+                            break
+                        if "bytes" in msg and msg["bytes"] is not None:
+                            await up.send(msg["bytes"])
+                        elif "text" in msg and msg["text"] is not None:
+                            await up.send(msg["text"])
+
+                async def pump_down():
+                    async for m in up:
+                        if isinstance(m, bytes):
+                            await ws.send_bytes(m)
+                        else:
+                            await ws.send_text(m)
+                t1 = asyncio.create_task(pump_up())
+                t2 = asyncio.create_task(pump_down())
+                done, pending = await asyncio.wait(
+                    (t1, t2), return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+        except (WebSocketDisconnect, Exception):  # noqa: BLE001
+            pass
+        finally:
+            try:
+                await up.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     if FRONTEND.exists():
-        @app.middleware("http")
-        async def _nocache(request, call_next):
-            resp = await call_next(request)
-            if request.url.path in ("/", "/index.html"):
-                resp.headers["Cache-Control"] = "no-cache"
-            return resp
         app.mount("/", StaticFiles(directory=FRONTEND, html=True),
                   name="frontend")
+
+        # pure-ASGI no-cache shim: BaseHTTPMiddleware (@app.middleware) was
+        # 403-ing every WebSocket upgrade — the classic starlette footgun
+        class _NoCacheIndex:
+            def __init__(self, inner):
+                self.inner = inner
+
+            async def __call__(self, scope, receive, send):
+                if scope["type"] == "http" and scope.get("path") in ("/", "/index.html"):
+                    async def send2(msg):
+                        if msg["type"] == "http.response.start":
+                            headers = [(k, v) for k, v in msg.get("headers", [])
+                                       if k.lower() != b"cache-control"]
+                            headers.append((b"cache-control", b"no-cache"))
+                            msg = {**msg, "headers": headers}
+                        await send(msg)
+                    return await self.inner(scope, receive, send2)
+                return await self.inner(scope, receive, send)
+        app.add_middleware(_NoCacheIndex)
     return app
 
 

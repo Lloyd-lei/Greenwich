@@ -156,7 +156,7 @@ async function poll(id){const t=setInterval(async()=>{const j=await api('/api/jo
  if(j.status==='failed'){$('#jobLog').textContent='FAILED: '+j.error;return}
  const r=j.result;drawDNA($('#dna'),r.tokens);
  $('#jobLog').textContent='done · motion #'+r.motion_id;
- if(r.viewer){$('#vpMsg').style.display='none';const f=$('#viserFrame');if(!f.src)f.src=r.viewer}
+ $('#vpMsg').style.display='none';
  const g=r.gate;$('#result').innerHTML=`<div class=kv><span>frames</span><b>${r.frames}</b></div><div class=kv><span>family</span><b>${r.family}</b></div><div class=kv><span>synergy</span><span class="badge ${g.passed?'pass':'fail'}">${g.passed?'PASS':'FLAG'} ${g.ratio}</span></div><div class=kv><span>trace</span><a href="/api/results/${r.trace}" download>download</a></div>${r.viewer_note?`<div class=status>${r.viewer_note}</div>`:''}`;
  loadRecent()},1200)}
 async function loadRecent(){const d=await api('/api/motions?limit=8');const R=$('#recent');R.innerHTML='';const A=$('#atlasMotions');A.innerHTML='';d.motions.forEach(m=>{const mk=()=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${m.title}</b><small>${m.family} · ${m.frames}f · gate ${typeof m.gate_ratio==='number'?m.gate_ratio.toFixed(2):m.gate_ratio}</small>`;return e};R.append(mk());const a=mk();a.onclick=async()=>{atlasSel=m.id;const w=await api('/api/atlas/portals/'+m.id+'?slot='+$('#slot').value);showPortals(w.portals)};A.append(a)})}
@@ -169,6 +169,8 @@ drop.ondrop=async e=>{e.preventDefault();drop.classList.remove('hover');upload(e
 $('#urdfFile').onchange=e=>upload(e.target.files[0]);
 async function upload(f){if(!f)return;const fd=new FormData();fd.append('file',f);drop.textContent='ingesting '+f.name+'…';const d=await api('/api/bodies/ingest',{method:'POST',body:fd});const t=setInterval(async()=>{const j=await api('/api/jobs/'+d.job_id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);drop.textContent=j.status==='done'?('registered: '+j.result.name+' ('+j.result.joints+' joints)'):('failed: '+j.error.slice(0,120));loadBodies()},1500)}
 (async()=>{try{const h=await api('/api/health');$('#health').textContent=`online · ${h.warm.device} · atlas ${h.warm.atlas_windows.toLocaleString()}`;
- if(h.viewer){$('#viserFrame').src=h.viewer;setTimeout(()=>$('#vpMsg').style.display='none',2000)}
+ const wsu=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/viser-ws';
+ $('#viserFrame').src='/viewer/?websocket='+encodeURIComponent(wsu);
+ setTimeout(()=>$('#vpMsg').style.display='none',2000);
  renderTl();await loadFams();await loadLib();await loadBodies();await loadRecent()}catch(e){$('#health').textContent='service offline';$('#health').style.color='var(--r)'}})();
 </script></body></html>

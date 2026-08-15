@@ -25,6 +25,8 @@ dependencies = [
   "viser>=0.2",
   "pillow>=10",
   "typer>=0.9",
+  "httpx>=0.27",
+  "websockets>=12",
 ]
 
 [project.optional-dependencies]
