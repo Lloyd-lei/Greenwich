@@ -20,15 +20,33 @@ AX = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], np.float64)  # Y-up -> Z-up
 
 
 def render_trace(tr: MotionTrace, xml: str, body: str,
-                 width: int = 640, height: int = 560) -> np.ndarray:
+                 width: int = 640, height: int = 560,
+                 follow: bool = True) -> np.ndarray:
     setup_gl_backend()
     import mujoco as mj
     from scipy.spatial.transform import Rotation
 
     from ..engine.descriptor import build_from_mjcf
-    model = mj.MjModel.from_xml_path(str(xml))
+    # vendor MJCFs ship the robot alone — no floor, no light — so offscreen
+    # exports came out as a dim robot on black. Stage it: ground plane +
+    # overhead light, and a bright headlight.
+    try:
+        spec = mj.MjSpec.from_file(str(xml))
+        spec.worldbody.add_geom(
+            name="_am_floor", type=mj.mjtGeom.mjGEOM_PLANE,
+            size=[20, 20, 0.1], rgba=[0.92, 0.92, 0.94, 1.0])
+        spec.worldbody.add_light(
+            name="_am_sun", pos=[0, -1, 3], dir=[0, 0.25, -1],
+            diffuse=[0.55, 0.55, 0.55], specular=[0.1, 0.1, 0.1],
+            castshadow=True)
+        model = spec.compile()
+    except Exception:  # noqa: BLE001 — stage is cosmetic, never fatal
+        model = mj.MjModel.from_xml_path(str(xml))
     model.vis.global_.offwidth = max(model.vis.global_.offwidth, width)
     model.vis.global_.offheight = max(model.vis.global_.offheight, height)
+    model.vis.headlight.ambient[:] = [0.42, 0.42, 0.42]
+    model.vis.headlight.diffuse[:] = [0.65, 0.65, 0.65]
+    model.vis.headlight.specular[:] = [0.2, 0.2, 0.2]
     data = mj.MjData(model)
     spec, dof, rest, qnames, _ = build_from_mjcf(xml, body)
     tab = -np.ones((spec.J, 3), np.int64)
@@ -60,7 +78,12 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
         data.qpos[:] = model.qpos0
         if root_adr >= 0:
             pm = tr.gp[t] @ AX / 100.0
-            data.qpos[root_adr:root_adr + 3] = [0, 0, -float(pm[:, 2].min())]
+            rt = (tr.root_t[t] @ AX / 100.0) \
+                if getattr(tr, "root_t", None) is not None else np.zeros(3)
+            data.qpos[root_adr:root_adr + 3] = \
+                [rt[0], rt[1], -float(pm[:, 2].min())]
+            if follow:
+                cam.lookat[0], cam.lookat[1] = rt[0], rt[1]
             data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
                 AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
         for j in range(spec.J):

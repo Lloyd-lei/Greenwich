@@ -61,16 +61,26 @@ class Equator:
 
     @torch.no_grad()
     def detokenize(self, tokens: torch.Tensor, endpoints, n_frames: int,
-                   boundary_codes: torch.Tensor | None = None):
+                   boundary_codes: torch.Tensor | None = None,
+                   rot_codes: torch.Tensor | None = None):
         """32 tokens (+ endpoint features) -> [n,256,20] int codes.
 
         Same tokens, ANY n = retiming (validated: 0.5x/1x/2x on 300-frame
         clips). boundary_codes [2,256] pins the first/last frame's pose slots
-        (A3's endpoint pass-through)."""
+        (A3's endpoint pass-through).
+
+        rot_codes [n,128,20]: the ROTATION-stream codes to carry. A3 only ever
+        learned to reconstruct the pose stream — its argmax on slots 128:256
+        decodes ~24 m off (measured 0814); the research stack always fed that
+        stream from ground-truth rows (bridge_demo.unpack_root). Pass the raw
+        stream whenever you have it; the argmax fallback exists only for
+        self-consistency metrics (eval_gate retime), never for playback."""
         z = self.a3.fsq.from_ints(
             ((tokens[:, None] // self._W) % 5)[None].float())[None]
         logits = self.a3.decode(z, endpoints, n_frames)
         codes = logits.argmax(-1)[0]
+        if rot_codes is not None:
+            codes[:, 128:] = rot_codes.long().to(self.device)
         if boundary_codes is not None:
             codes[0, :128] = boundary_codes[0, :128].to(self.device)
             codes[-1, :128] = boundary_codes[1, :128].to(self.device)

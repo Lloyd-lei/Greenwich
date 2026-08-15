@@ -104,12 +104,20 @@ class Greenwich:
     @torch.no_grad()
     def decode(self, codes: torch.Tensor, spec: SkeletonSpec, dof):
         """[T,256,20] int codes -> global rot6d [T,J,6] on the target body."""
+        return self.decode_full(codes, spec, dof)[0]
+
+    @torch.no_grad()
+    def decode_full(self, codes: torch.Tensor, spec: SkeletonSpec, dof):
+        """Both decoder heads: (rot6d [T,J,6], pos [T,J,3] root-relative,
+        reach-normalised). The position head carries placement information the
+        rotation stream alone cannot express on a mismatched skeleton (owner
+        call 0814: pose the mesh from position + rot together)."""
         g = self.geom(spec, dof)
         q = (codes.float() - 4.0) / 3.5
         zp = self.model.fsqp.proj_out(q[:, :128])
         zr = self.model.fsqr.proj_out(q[:, 128:])
-        rot, _pos = self.model.decode(zp, zr, geom_batch(g, codes.shape[0]))
-        return rot
+        rot, pos = self.model.decode(zp, zr, geom_batch(g, codes.shape[0]))
+        return rot, pos
 
     @torch.no_grad()
     def translate(self, pose9: torch.Tensor, src_spec, src_dof,

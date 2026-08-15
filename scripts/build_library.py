@@ -54,6 +54,10 @@ def main() -> None:
     print(f"library windows: {len(picked)}")
 
     bounds = np.zeros((len(picked), 4, 256, 20), np.int8)
+    # RAW dual-stream codes, packed 2 dims/byte: playback must be the corpus
+    # codes themselves — A3 cannot regenerate the rotation stream (0814 audit:
+    # argmax on slots 128:256 decodes ~24 m off; raw stream decodes exact).
+    packed = np.zeros((len(picked), idx.window, 256, 10), np.uint8)
     for i, w in enumerate(picked):
         ci, st_rel = int(idx.clip[w]), int(idx.start[w])
         st = seqs[ci]["start"] + st_rel
@@ -64,9 +68,14 @@ def main() -> None:
         root[..., 0::2] = pk & 0x0F
         root[..., 1::2] = (pk >> 4) & 0x0F
         bounds[i] = torch.cat([pose, root], 1).numpy().astype(np.int8)
+        win = np.arange(st, st + idx.window)
+        pw = np.ascontiguousarray(cp[win]).astype(np.uint8)      # [w,128,20]
+        packed[i, :, :128] = pw[..., 0::2] | (pw[..., 1::2] << 4)
+        packed[i, :, 128:] = np.ascontiguousarray(cr[win])       # already packed
 
     out = AM / "weights_staging" / "library"
     out.mkdir(parents=True, exist_ok=True)
+    np.save(out / "library_codes.npy", packed)   # .npy: mmap-able at load
     np.savez_compressed(out / "library.npz",
                         tokens=idx.tokens[picked].astype(np.int32),
                         bounds=bounds,

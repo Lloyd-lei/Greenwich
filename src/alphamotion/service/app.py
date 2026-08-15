@@ -157,23 +157,45 @@ def create_app() -> FastAPI:
 
     # ---------------------------------------------------------- pipeline ----
     def _segment_codes(seg: Segment, eq, lib):
-        """One timeline segment -> (codes [n,256,20] on device)."""
+        """One timeline segment -> (codes [n,256,20] on device).
+
+        Playback = the window's RAW corpus codes (bit-faithful). n != window
+        retimes by index resampling BOTH streams. Only pinned segments run the
+        A3 pose-stream regeneration — and even then the rotation stream stays
+        raw (A3 never learned it; 0814 audit)."""
         if seg.kind == "library":
             tok, bounds, name, fam = lib.entry(seg.library_id)
-            ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
-            tokens = torch.from_numpy(tok).to(eq.device)
+            raw = torch.from_numpy(
+                lib.raw_codes(seg.library_id).astype(np.int64))
+            if seg.n != raw.shape[0]:
+                ridx = np.round(np.linspace(
+                    0, raw.shape[0] - 1, seg.n)).astype(np.int64)
+                raw = raw[ridx]
+            raw = raw.to(eq.device)
             if seg.pins:
+                tokens = torch.from_numpy(tok).to(eq.device)
                 for slot, val in seg.pins.items():
                     tokens[int(slot)] = int(val)
-            return eq.detokenize(tokens, ep, seg.n), name
+                ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
+                return eq.detokenize(tokens, ep, seg.n,
+                                     rot_codes=raw[:, 128:]), name
+            return raw, name
         raise ValueError(f"segment kind '{seg.kind}' not handled here")
 
     def _bridge_codes(eq, prev_codes, next_codes, n, seed, temperature):
-        """Equator bridge between two code chunks (their boundary frames)."""
+        """Equator bridge between two code chunks (their boundary frames).
+
+        Pose stream: B3-sampled tokens through A3 (the validated bridge).
+        Rotation stream: A3 cannot produce it — linear interpolation between
+        the two boundary frames' raw rotation codes, snapped to the lattice."""
         codes4 = torch.cat([prev_codes[-2:], next_codes[:2]], 0)
         ep = eq.endpoints_from_codes(codes4.cpu())
         tok = eq.sample_tokens(ep, n, temperature=temperature, seed=seed)
-        return eq.detokenize(tok, ep, n,
+        a = prev_codes[-1, 128:].float()
+        b = next_codes[0, 128:].float()
+        w = torch.linspace(0, 1, n, device=a.device)[:, None, None]
+        rot_interp = torch.round((1 - w) * a + w * b).long()
+        return eq.detokenize(tok, ep, n, rot_codes=rot_interp,
                              boundary_codes=torch.stack(
                                  [prev_codes[-1], next_codes[0]]))
 
@@ -190,22 +212,24 @@ def create_app() -> FastAPI:
         gw, eq, atlas = POOL.greenwich, POOL.equator, POOL.atlas
         hspec, hdof, _hrest = POOL.human
         emb = registry.load(target_body)
-        rot = gw.decode(codes, emb.spec, emb.dof)
+        rot, pos_n = gw.decode_full(codes, emb.spec, emb.dof)
         rot_h = gw.decode(codes, hspec, hdof)
-        # RENDER PATH = the raw spatial-token decode, nothing else (owner
-        # call 0814: no refinement of any kind). fit_angles(clamp=False,
-        # greedy) is a pure kinematic CONVERSION of the decoded global
-        # rotations into the mesh's hinge coordinates — no optimisation, no
-        # limit clamping, no smoothing.
+        # RENDER PATH = the audited release conversion (four-arm duel 0814,
+        # version_duel_h1.mp4): whole-chain global LM projection of the
+        # decoded rotations — the exact chain every accepted research video
+        # used. The position head is decoded too and drives stride odometry
+        # (contact-integrated world translation); an lm_fit against it as
+        # per-joint targets was tried and looked WORSE than this (tile C).
         Rg = rot6d_to_matrix(rot).double()
         dof_t = torch.as_tensor(emb.dof, device=POOL.device,
                                 dtype=torch.float64)
         rest_t = torch.as_tensor(emb.rest, device=POOL.device,
                                  dtype=torch.float64)
-        q, _ = MP.fit_angles(Rg, emb.spec, dof_t, rest=rest_t,
-                             clamp=False, method="greedy")
+        _r6, _gp, q = MP.project(Rg, emb.spec, dof_t, rest=rest_t,
+                                 method="global", lm_iters=20)
+        q = q.detach()
         refined = rot                       # ship the decode itself
-        rrep = {"refiner": "none (raw spatial-token decode)"}
+        rrep = {"refiner": "none (release conversion: global projection)"}
         # SE3 constrained re-projection on requested spans
         for c in se3:
             Rg = rot6d_to_matrix(refined).double()
@@ -230,13 +254,21 @@ def create_app() -> FastAPI:
         # trace + assets
         gp = fk_pos(refined.cpu().numpy(), emb.spec)
         rootR = rot6d_to_matrix(refined[:, 0:1, :6]).cpu().numpy()[:, 0]
+        # world translation from the POSITION head via stride odometry — the
+        # representation is root-relative by design; this is where locomotion
+        # gets its displacement back.
+        from ..engine.odometry import stride_odometry
+        reach_cm = float(np.linalg.norm(gp, axis=-1).max())
+        gp_head = pos_n.detach().cpu().numpy() * reach_cm
+        root_t = stride_odometry(gp_head, list(emb.spec.joint_names), fps)
         stage = np.ones(len(refined), np.int32)
         mid_title = title or f"{source}-{int(time.time())}"
-        trace = MotionTrace(q=q.cpu().numpy(), rootR=rootR, gp=gp,
+        trace = MotionTrace(q=q.detach().cpu().numpy(), rootR=rootR, gp=gp,
                             stage=stage, fps=fps, title=mid_title,
                             target=target_body,
                             tokens=tok_final.cpu().numpy(),
-                            joint_names=list(emb.spec.joint_names))
+                            joint_names=list(emb.spec.joint_names),
+                            root_t=root_t)
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family_of(prompt or mid_title)

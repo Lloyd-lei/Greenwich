@@ -80,8 +80,11 @@ class LiveViewer:
             data.qpos[:] = model.qpos0
             if root_adr >= 0:
                 pm = trace.gp[t] @ AX / 100.0
+                rt = (trace.root_t[t] @ AX / 100.0) \
+                    if getattr(trace, "root_t", None) is not None \
+                    else np.zeros(3)
                 data.qpos[root_adr:root_adr + 3] = \
-                    [0, 0, -float(pm[:, 2].min())]
+                    [rt[0], rt[1], -float(pm[:, 2].min())]
                 data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
                     AX.T @ trace.rootR[t] @ AX).as_quat(scalar_first=True)
             for j in range(spec.J):
