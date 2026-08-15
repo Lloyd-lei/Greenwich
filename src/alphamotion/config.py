@@ -36,7 +36,7 @@ class AMConfig:
     host: str = os.environ.get("ALPHAMOTION_HOST", "127.0.0.1")
     port: int = int(os.environ.get("ALPHAMOTION_PORT", "7860"))
     viewer_ports: tuple[int, int] = (7871, 7876)   # inclusive-exclusive pool
-    hf_repo: str = os.environ.get("ALPHAMOTION_HF_REPO", "lloyd-lei/Greenwich")
+    hf_repo: str = os.environ.get("ALPHAMOTION_HF_REPO", "lloydlei/Greenwich")
     # perception (optional): python executable of the env that runs GENMO
     genmo_python: str = os.environ.get("ALPHAMOTION_GENMO_PYTHON", "")
     genmo_repo: str = os.environ.get("ALPHAMOTION_GENMO_REPO", "")

@@ -4,7 +4,7 @@ from pathlib import Path
 from huggingface_hub import HfApi
 
 STAGE = Path(__file__).parent.parent / "weights_staging"
-REPO = "lloyd-lei/Greenwich"
+REPO = "lloydlei/Greenwich"
 
 api = HfApi()
 api.create_repo(REPO, exist_ok=True, repo_type="model")
