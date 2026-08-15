@@ -3,47 +3,56 @@
 <title>AlphaMotion</title>
 <style>
 :root{--bg:#0a0a0c;--p:#121316;--line:#26282e;--tx:#f2f2f2;--mut:#8d93a0;--o:#ff8000;--o2:#ff9e40;--g:#38d47f;--r:#f05d4d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px Inter,system-ui,sans-serif}
-.top{height:54px;display:flex;align-items:center;gap:22px;padding:0 20px;border-bottom:1px solid var(--line)}
-.brand{font-weight:800;font-size:17px;letter-spacing:.02em}.brand b{color:var(--o)}
-.tab{cursor:pointer;color:var(--mut);padding:6px 2px;border-bottom:2px solid transparent}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px Inter,system-ui,sans-serif;overflow:hidden}
+.top{height:50px;display:flex;align-items:center;gap:22px;padding:0 18px;border-bottom:1px solid var(--line)}
+.brand{font-weight:800;font-size:17px}.brand b{color:var(--o)}
+.tab{cursor:pointer;color:var(--mut);padding:5px 2px;border-bottom:2px solid transparent;font-size:13.5px}
 .tab.on{color:var(--tx);border-color:var(--o)}
 #health{margin-left:auto;color:var(--g);font-size:12px}
-.wrap{display:none;padding:18px;gap:18px}.wrap.on{display:grid}
-#studio.on{grid-template-columns:280px 1fr 330px}
-#atlas.on{grid-template-columns:340px 1fr}
-#bodies.on{grid-template-columns:320px 1fr}
-.panel{background:var(--p);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto;max-height:calc(100vh - 100px)}
-h2{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:0 0 10px}
-button,select,input{font:inherit;color:var(--tx);background:#191b20;border:1px solid var(--line);border-radius:7px;padding:8px 10px;width:100%}
+.view{display:none;height:calc(100vh - 50px)}.view.on{display:flex}
+#studio.on{flex-direction:row}
+.bin{width:250px;border-right:1px solid var(--line);background:var(--p);padding:12px;overflow:auto;flex-shrink:0}
+.stage{flex:1;display:flex;flex-direction:column;min-width:0}
+#vp{flex:1;background:#000;position:relative}
+#vp iframe{width:100%;height:100%;border:0;display:block}
+#vpMsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);pointer-events:none;font-size:13px;background:#0a0a0c}
+.deck{height:190px;border-top:1px solid var(--line);background:var(--p);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.deckrow{display:flex;align-items:center;gap:10px}
+.tl{flex:1;height:74px;background:#0d0e11;border:1px solid var(--line);border-radius:9px;display:flex;overflow-x:auto;padding:5px;gap:5px}
+.blk{height:100%;min-width:86px;border-radius:7px;background:linear-gradient(180deg,#ff9e40,#ff8000);color:#1a1109;padding:7px 9px;font-size:11.5px;position:relative;flex-shrink:0}
+.blk.gap{background:repeating-linear-gradient(45deg,#2c2417,#2c2417 7px,#1c1812 7px 14px);color:var(--o2);border:1px dashed #7a5a2c}
+.blk b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
+.blk input{width:52px;background:#00000030;border:0;border-radius:4px;color:inherit;font-size:11px;padding:2px 4px;margin-top:5px}
+.blk .x{position:absolute;top:3px;right:5px;cursor:pointer;opacity:.6}
+.blk .x:hover{opacity:1}
+.inspector{width:300px;border-left:1px solid var(--line);background:var(--p);padding:12px;overflow:auto;flex-shrink:0}
+h2{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:14px 0 8px}h2:first-child{margin-top:0}
+button,select,input[type=text],input[type=search]{font:inherit;color:var(--tx);background:#191b20;border:1px solid var(--line);border-radius:7px;padding:7px 10px;width:100%}
 button{cursor:pointer}button.primary{background:var(--o);border-color:var(--o);color:#191007;font-weight:750}
-button.mini{width:auto;padding:4px 9px;font-size:12px}
-.chips{display:flex;flex-wrap:wrap;gap:6px;margin:8px 0}
-.chip{font-size:12px;padding:4px 10px;border-radius:14px;border:1px solid var(--line);cursor:pointer;color:var(--mut)}
+button.mini{width:auto;padding:4px 10px;font-size:12px}
+.chips{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}
+.chip{font-size:11.5px;padding:3px 9px;border-radius:12px;border:1px solid var(--line);cursor:pointer;color:var(--mut)}
 .chip.on{border-color:var(--o);color:var(--o)}
-.card{padding:9px;border:1px solid var(--line);border-radius:8px;margin-top:7px;cursor:pointer;background:#0d0e11}
-.card:hover{border-color:var(--o2)}.card b{display:block;font-size:12.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.card small{color:var(--mut)}
-.seg{display:flex;align-items:center;gap:8px;padding:8px;border:1px solid var(--line);border-radius:8px;margin-top:8px;background:#0d0e11}
-.seg .kind{font-size:11px;padding:2px 8px;border-radius:10px;background:#1c2b40;color:#9cc0f5}
-.seg .kind.gap{background:#3a2410;color:var(--o2)}
-.seg input{width:64px;padding:4px 6px}
-.seg .x{margin-left:auto;color:var(--r);cursor:pointer;background:none;border:none;width:auto}
-.bar{height:64px;background:#0d0e11;border:1px solid var(--line);border-radius:8px;position:relative;display:flex;overflow:hidden;margin-top:10px}
-.bar .blk{height:100%;display:flex;align-items:center;justify-content:center;font-size:11px;color:#1a1109;background:var(--o2);border-right:1px solid #0a0a0c;min-width:24px}
-.bar .blk.gap{background:repeating-linear-gradient(45deg,#333,#333 6px,#26282e 6px 12px);color:var(--o2)}
-canvas.dna{width:100%;height:34px;border-radius:6px;border:1px solid var(--line);margin-top:8px;image-rendering:pixelated}
-.badge{display:inline-block;padding:3px 10px;border-radius:12px;font-size:12px;font-weight:700}
+.card{padding:8px;border:1px solid var(--line);border-radius:8px;margin-top:6px;cursor:pointer;background:#0d0e11}
+.card:hover{border-color:var(--o2)}.card b{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card small{color:var(--mut);font-size:11px}
+.badge{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;font-weight:700}
 .badge.pass{background:#0d2b1c;color:var(--g)}.badge.fail{background:#33150f;color:var(--r)}
-.kv{display:flex;justify-content:space-between;border-bottom:1px solid #1c1e23;padding:6px 0;font-size:13px}
+.kv{display:flex;justify-content:space-between;border-bottom:1px solid #1c1e23;padding:5px 0;font-size:12.5px}
 .kv b{color:var(--o2);font-weight:600}
-pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:10px;font-size:11.5px;overflow:auto;color:var(--mut)}
-.portal{display:flex;gap:10px;align-items:center;padding:8px;border:1px solid var(--line);border-radius:8px;margin-top:7px}
-.portal .fam{font-size:11px;padding:2px 8px;border-radius:10px;background:#231a10;color:var(--o2)}
-.status{color:var(--mut);font-size:12.5px;line-height:1.5;margin-top:8px}
+canvas.dna{width:100%;height:26px;border-radius:5px;border:1px solid var(--line);image-rendering:pixelated}
+.status{color:var(--mut);font-size:12px;line-height:1.45;margin-top:6px}
 a{color:var(--o2)}
-.drop{border:2px dashed var(--line);border-radius:10px;padding:26px;text-align:center;color:var(--mut);cursor:pointer;margin-top:8px}
+pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:11px;overflow:auto;color:var(--mut)}
+.portal{display:flex;gap:9px;align-items:center;padding:7px;border:1px solid var(--line);border-radius:8px;margin-top:6px;font-size:12px}
+.portal .fam{font-size:10.5px;padding:2px 7px;border-radius:9px;background:#231a10;color:var(--o2)}
+.drop{border:2px dashed var(--line);border-radius:10px;padding:22px;text-align:center;color:var(--mut);cursor:pointer;margin-top:8px;font-size:12.5px}
 .drop.hover{border-color:var(--o)}
+.panel{background:var(--p);border:1px solid var(--line);border-radius:10px;padding:14px;overflow:auto}
+#atlas.on,#bodies.on{padding:16px;gap:16px}
+#atlas .panel,#bodies .panel{max-height:calc(100vh - 84px)}
+#atlas.on{display:grid;grid-template-columns:330px 1fr}
+#bodies.on{display:grid;grid-template-columns:310px 1fr}
 </style></head><body>
 <header class="top">
   <div class="brand">Alpha<b>Motion</b></div>
@@ -53,68 +62,68 @@ a{color:var(--o2)}
   <div id="health">connecting…</div>
 </header>
 
-<main id="studio" class="wrap on">
-  <section class="panel">
-    <h2>Clip library <span id="libTotal"></span></h2>
-    <input id="libQ" placeholder="search clips…">
+<div id="studio" class="view on">
+  <aside class="bin">
+    <h2>Library <span id="libTotal"></span></h2>
+    <input id="libQ" type="search" placeholder="search clips…">
     <div id="famChips" class="chips"></div>
     <div id="libList"></div>
     <button id="libMore" class="mini" style="margin-top:8px">more</button>
-  </section>
-  <section class="panel">
-    <h2>Timeline</h2>
-    <div id="segList"></div>
-    <div style="display:flex;gap:8px;margin-top:10px">
-      <button id="addGap" class="mini">+ bridge gap</button>
-      <button id="clearTl" class="mini">clear</button>
+  </aside>
+  <section class="stage">
+    <div id="vp">
+      <iframe id="viserFrame" allow="fullscreen"></iframe>
+      <div id="vpMsg">connecting viewport…</div>
     </div>
-    <div class="bar" id="tlBar"></div>
-    <p class="status">Click a library clip to append it. Drag the <b>n</b> fields to set each block's time budget — same tokens, any duration. A <i>gap</i> is generated by Equator between its neighbours.</p>
-    <h2 style="margin-top:16px">Viewport</h2>
-    <div id="viewport" style="background:#0d0e11;border:1px solid var(--line);border-radius:10px;height:460px;display:flex;align-items:center;justify-content:center;color:var(--mut);font-size:13px;overflow:hidden">generate something — the robot plays here</div>
-    <h2 style="margin-top:16px">Result</h2>
-    <div id="result" class="status">nothing yet</div>
-    <canvas id="dna" class="dna" width="640" height="34"></canvas>
-    <p class="status">Motion DNA — the 32 rainbow tokens of the result. Click a band in the Atlas tab to find portals through it.</p>
+    <div class="deck">
+      <div class="deckrow">
+        <div class="tl" id="tl"></div>
+      </div>
+      <div class="deckrow">
+        <button id="addGap" class="mini">+ bridge gap</button>
+        <button id="clearTl" class="mini">clear</button>
+        <canvas id="dna" class="dna" width="640" height="26" style="flex:1"></canvas>
+        <span id="tlTotal" class="status" style="margin:0;white-space:nowrap"></span>
+      </div>
+    </div>
   </section>
-  <section class="panel">
+  <aside class="inspector">
     <h2>Compile</h2>
-    <label class="status">Target body</label><select id="body"></select>
-    <label class="status" style="margin-top:8px;display:block">Title</label><input id="title" placeholder="optional">
-    <button id="compile" class="primary" style="margin-top:12px">Generate on robot</button>
+    <select id="body"></select>
+    <input id="title" type="text" placeholder="title (optional)" style="margin-top:7px">
+    <button id="compile" class="primary" style="margin-top:10px">Generate</button>
     <div id="jobLog" class="status"></div>
-    <h2 style="margin-top:18px">Quality gate</h2>
-    <div id="gatePanel" class="status">Every generation passes the refiner, then the <b>synergy gate</b>: the refined motion must keep ≥70% AR-likelihood of the original coordination pattern.</div>
-    <h2 style="margin-top:18px">Recent motions</h2>
+    <h2>Result</h2>
+    <div id="result" class="status">nothing yet</div>
+    <h2>Recent</h2>
     <div id="recent"></div>
-  </section>
-</main>
+  </aside>
+</div>
 
-<main id="atlas" class="wrap">
+<div id="atlas" class="view">
   <section class="panel">
     <h2>Motion</h2>
     <div id="atlasMotions"></div>
-    <h2 style="margin-top:14px">Slot</h2>
-    <input id="slot" type="range" min="0" max="31" value="16">
-    <div class="status">slot <b id="slotV">16</b> / 32 — every band of the DNA is a doorway</div>
-    <canvas id="dna2" class="dna" width="640" height="34"></canvas>
+    <h2>Slot</h2>
+    <input id="slot" type="range" min="0" max="31" value="16" style="width:100%">
+    <div class="status">slot <b id="slotV">16</b>/32 — every DNA band is a doorway</div>
+    <canvas id="dna2" class="dna" width="640" height="26" style="margin-top:6px"></canvas>
   </section>
   <section class="panel">
     <h2>Portals</h2>
     <div id="portals" class="status">pick a motion on the left</div>
-    <h2 style="margin-top:16px">Random walk</h2>
-    <button id="walkBtn" class="mini">wander from here</button>
+    <h2>Random walk</h2>
+    <button id="walkBtn" class="mini">wander</button>
     <div id="walkOut" class="status"></div>
-    <p class="status" style="margin-top:14px">The Atlas is a fixed-capacity index of 65,536 rainbow-code windows over real motion. Any generated motion is registered on completion; any shared token is a portal into every other motion passing through it — motion space as a navigable graph, not a black-box sampler.</p>
   </section>
-</main>
+</div>
 
-<main id="bodies" class="wrap">
+<div id="bodies" class="view">
   <section class="panel">
     <h2>Embodiments</h2>
     <div id="bodyList"></div>
-    <h2 style="margin-top:16px">Bring your own robot</h2>
-    <div id="drop" class="drop">drop a URDF here<br><small>parse → limits → semantic labels → refiner, automatically</small></div>
+    <h2>Bring your own robot</h2>
+    <div id="drop" class="drop">drop a URDF here<br><small>parse → limits → labels → refiner, automatic</small></div>
     <input id="urdfFile" type="file" accept=".urdf,.xml" style="display:none">
   </section>
   <section class="panel">
@@ -122,42 +131,44 @@ a{color:var(--o2)}
     <div id="bodyDetail" class="status"></div>
     <pre id="bodyJson" style="display:none"></pre>
   </section>
-</main>
+</div>
 
 <script>
 const $=s=>document.querySelector(s);const api=async(p,o)=>{const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()};
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));document.querySelectorAll('.wrap').forEach(w=>w.classList.toggle('on',w.id===t.dataset.v))});
-let fam='',off=0,segs=[],lastTokens=null,atlasSel=null;
+document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));document.querySelectorAll('.view').forEach(w=>w.classList.toggle('on',w.id===t.dataset.v))});
+let fam='',off=0,segs=[],atlasSel=null;
 const tokColor=t=>{const h=(t*2654435761>>>0)%360;return `hsl(${h} 75% 55%)`};
 function drawDNA(cv,toks){const c=cv.getContext('2d');c.clearRect(0,0,cv.width,cv.height);if(!toks)return;const w=cv.width/32;toks.forEach((t,i)=>{c.fillStyle=tokColor(t);c.fillRect(i*w,0,w-1,cv.height)})}
-async function loadFams(){const d=await api('/api/families');$('#famChips').innerHTML='';['',...d.families].forEach(f=>{const c=document.createElement('span');c.className='chip'+(f===fam?' on':'');c.textContent=f||'all';c.onclick=()=>{fam=f;off=0;$('#libList').innerHTML='';loadLib()};$('#famChips').append(c)})}
-async function loadLib(){const d=await api(`/api/library?q=${encodeURIComponent($('#libQ').value)}&family=${fam}&offset=${off}&limit=14`);$('#libTotal').textContent=`(${d.total})`;d.items.forEach(it=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${it.name}</b><small>${it.family}</small>`;e.onclick=()=>{segs.push({kind:'library',library_id:it.id,n:60,name:it.name.slice(0,26)});renderSegs()};$('#libList').append(e)});off+=d.items.length}
-function renderSegs(){const L=$('#segList');L.innerHTML='';segs.forEach((s,i)=>{const e=document.createElement('div');e.className='seg';e.innerHTML=`<span class="kind ${s.kind==='gap'?'gap':''}">${s.kind}</span><span style="font-size:12px">${s.name||'Equator bridge'}</span> n=<input type="number" min="15" max="300" value="${s.n}">`;e.querySelector('input').oninput=ev=>s.n=+ev.target.value||60;const x=document.createElement('button');x.className='x';x.textContent='✕';x.onclick=()=>{segs.splice(i,1);renderSegs()};e.append(x);L.append(e)});const B=$('#tlBar');B.innerHTML='';const tot=segs.reduce((a,s)=>a+s.n,0)||1;segs.forEach(s=>{const b=document.createElement('div');b.className='blk'+(s.kind==='gap'?' gap':'');b.style.width=(100*s.n/tot)+'%';b.textContent=s.n;B.append(b)})}
-$('#addGap').onclick=()=>{segs.push({kind:'gap',n:45});renderSegs()};
-$('#clearTl').onclick=()=>{segs=[];renderSegs()};
+async function loadFams(){const d=await api('/api/families');$('#famChips').innerHTML='';['',...d.families].forEach(f=>{const c=document.createElement('span');c.className='chip'+(f===fam?' on':'');c.textContent=f||'all';c.onclick=()=>{fam=f;off=0;$('#libList').innerHTML='';loadLib();document.querySelectorAll('#famChips .chip').forEach(x=>x.classList.toggle('on',x.textContent===(f||'all')))};$('#famChips').append(c)})}
+async function loadLib(){const d=await api(`/api/library?q=${encodeURIComponent($('#libQ').value)}&family=${fam}&offset=${off}&limit=14`);$('#libTotal').textContent=`(${d.total})`;d.items.forEach(it=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${it.name}</b><small>${it.family}</small>`;e.onclick=()=>{segs.push({kind:'library',library_id:it.id,n:60,name:it.name.slice(0,24)});renderTl()};$('#libList').append(e)});off+=d.items.length}
+function renderTl(){const T=$('#tl');T.innerHTML=segs.length?'':'<div style="color:var(--mut);font-size:12px;align-self:center;padding:0 8px">click library clips to build a timeline</div>';segs.forEach((s,i)=>{const b=document.createElement('div');b.className='blk'+(s.kind==='gap'?' gap':'');b.style.minWidth=Math.max(70,s.n*1.4)+'px';b.innerHTML=`<b>${s.kind==='gap'?'Equator bridge':s.name}</b>n=<input type="number" min="15" max="300" value="${s.n}">`;b.querySelector('input').oninput=ev=>{s.n=+ev.target.value||60;$('#tlTotal').textContent=tlTotal()};const x=document.createElement('span');x.className='x';x.textContent='✕';x.onclick=()=>{segs.splice(i,1);renderTl()};b.append(x);T.append(b)});$('#tlTotal').textContent=tlTotal()}
+function tlTotal(){const n=segs.reduce((a,s)=>a+s.n,0);return n?`${n}f · ${(n/30).toFixed(1)}s`:''}
+$('#addGap').onclick=()=>{if(segs.length)segs.push({kind:'gap',n:45});renderTl()};
+$('#clearTl').onclick=()=>{segs=[];renderTl()};
 $('#libQ').oninput=()=>{clearTimeout(window.qq);window.qq=setTimeout(()=>{off=0;$('#libList').innerHTML='';loadLib()},200)};
 $('#libMore').onclick=loadLib;
 async function loadBodies(){const d=await api('/api/bodies');$('#body').innerHTML=d.bodies.map(b=>`<option>${b.name}</option>`).join('');$('#body').value='unitree_h1';const L=$('#bodyList');L.innerHTML='';d.bodies.forEach(b=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${b.name}</b><small>${b.source}</small>`;e.onclick=async()=>{const det=await api('/api/bodies/'+b.name);$('#bodyName').textContent=b.name;$('#bodyDetail').innerHTML=`<div class=kv><span>joints</span><b>${det.joints}</b></div><div class=kv><span>height</span><b>${det.height_cm} cm</b></div><div class=kv><span>source</span><b>${det.source}</b></div>`;$('#bodyJson').style.display='block';$('#bodyJson').textContent=JSON.stringify({joint_names:det.joint_names,sem_labels:det.sem_labels||null,limits:det.limit_report||null},null,1)};L.append(e)})}
 $('#compile').onclick=async()=>{if(!segs.length){$('#jobLog').textContent='timeline is empty';return}
- const payload={segments:segs.map(({name,...s})=>s),target_body:$('#body').value,title:$('#title').value,render:true};
- try{const d=await api('/api/jobs/timeline',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});$('#jobLog').textContent='job '+d.job_id+' running…';poll(d.job_id)}catch(e){$('#jobLog').textContent='failed: '+e.message}};
-async function poll(id){const t=setInterval(async()=>{const j=await api('/api/jobs/'+id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);
+ const payload={segments:segs.map(({name,...s})=>s),target_body:$('#body').value,title:$('#title').value,render:false};
+ $('#compile').disabled=true;
+ try{const d=await api('/api/jobs/timeline',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});$('#jobLog').textContent='job '+d.job_id+' running…';poll(d.job_id)}catch(e){$('#jobLog').textContent='failed: '+e.message;$('#compile').disabled=false}};
+async function poll(id){const t=setInterval(async()=>{const j=await api('/api/jobs/'+id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);$('#compile').disabled=false;
  if(j.status==='failed'){$('#jobLog').textContent='FAILED: '+j.error;return}
- const r=j.result;lastTokens=r.tokens;drawDNA($('#dna'),r.tokens);
+ const r=j.result;drawDNA($('#dna'),r.tokens);
  $('#jobLog').textContent='done · motion #'+r.motion_id;
- const vp=$('#viewport');vp.innerHTML='';
- if(r.viewer){const f=document.createElement('iframe');f.src=r.viewer;f.style.cssText='width:100%;height:100%;border:0';vp.append(f)}
- else{vp.textContent=r.viewer_note||'no mesh attached for this body — trace download only'}
- const g=r.gate;$('#result').innerHTML=`<div class=kv><span>frames</span><b>${r.frames}</b></div><div class=kv><span>family</span><b>${r.family}</b></div><div class=kv><span>synergy</span><span class="badge ${g.passed?'pass':'fail'}">${g.passed?'PASS':'FLAG'} ${g.ratio}</span></div><div class=kv><span>trace</span><a href="/api/results/${r.trace}" download>download</a></div>${r.mp4?`<div class=kv><span>video</span><a href="/api/results/${r.mp4}" download>mp4</a></div>`:''}`;
+ if(r.viewer){$('#vpMsg').style.display='none';const f=$('#viserFrame');if(!f.src)f.src=r.viewer}
+ const g=r.gate;$('#result').innerHTML=`<div class=kv><span>frames</span><b>${r.frames}</b></div><div class=kv><span>family</span><b>${r.family}</b></div><div class=kv><span>synergy</span><span class="badge ${g.passed?'pass':'fail'}">${g.passed?'PASS':'FLAG'} ${g.ratio}</span></div><div class=kv><span>trace</span><a href="/api/results/${r.trace}" download>download</a></div>${r.viewer_note?`<div class=status>${r.viewer_note}</div>`:''}`;
  loadRecent()},1200)}
-async function loadRecent(){const d=await api('/api/motions?limit=8');const R=$('#recent');R.innerHTML='';const A=$('#atlasMotions');A.innerHTML='';d.motions.forEach(m=>{const mk=t=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${m.title}</b><small>${m.family} · ${m.frames}f · gate ${m.gate_ratio?.toFixed?m.gate_ratio.toFixed(2):m.gate_ratio}</small>`;return e};R.append(mk());const a=mk();a.onclick=async()=>{atlasSel=m.id;const w=await api('/api/atlas/portals/'+m.id+'?slot='+$('#slot').value);showPortals(w.portals);const mm=await api('/api/motions?limit=50');const row=mm.motions.find(x=>x.id===m.id);};A.append(a)})}
-function showPortals(ps){const P=$('#portals');P.innerHTML=ps.length?'':'no portals through this token';ps.forEach(p=>{const e=document.createElement('div');e.className='portal';e.innerHTML=`<span class=fam>${p.family}</span><span style="font-size:12px;flex:1">${p.clip.slice(0,46)}</span><b style="color:var(--o2)">${p.score}</b>`;P.append(e)})}
+async function loadRecent(){const d=await api('/api/motions?limit=8');const R=$('#recent');R.innerHTML='';const A=$('#atlasMotions');A.innerHTML='';d.motions.forEach(m=>{const mk=()=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${m.title}</b><small>${m.family} · ${m.frames}f · gate ${typeof m.gate_ratio==='number'?m.gate_ratio.toFixed(2):m.gate_ratio}</small>`;return e};R.append(mk());const a=mk();a.onclick=async()=>{atlasSel=m.id;const w=await api('/api/atlas/portals/'+m.id+'?slot='+$('#slot').value);showPortals(w.portals)};A.append(a)})}
+function showPortals(ps){const P=$('#portals');P.innerHTML=ps.length?'':'no portals through this token';ps.forEach(p=>{const e=document.createElement('div');e.className='portal';e.innerHTML=`<span class=fam>${p.family}</span><span style="flex:1">${p.clip.slice(0,44)}</span><b style="color:var(--o2)">${p.score}</b>`;P.append(e)})}
 $('#slot').oninput=async()=>{$('#slotV').textContent=$('#slot').value;if(atlasSel){const w=await api('/api/atlas/portals/'+atlasSel+'?slot='+$('#slot').value);showPortals(w.portals)}};
-$('#walkBtn').onclick=async()=>{const d=await api('/api/atlas/walk/'+Math.floor(Math.random()*65536)+'?steps=6');$('#walkOut').innerHTML=d.path.map(p=>`<div class=kv><span>${p.clip.slice(0,40)}</span><b>${p.family}</b></div>`).join('')};
+$('#walkBtn').onclick=async()=>{const d=await api('/api/atlas/walk/'+Math.floor(Math.random()*65536)+'?steps=6');$('#walkOut').innerHTML=d.path.map(p=>`<div class=kv><span>${p.clip.slice(0,38)}</span><b>${p.family}</b></div>`).join('')};
 const drop=$('#drop');drop.onclick=()=>$('#urdfFile').click();
 drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};drop.ondragleave=()=>drop.classList.remove('hover');
 drop.ondrop=async e=>{e.preventDefault();drop.classList.remove('hover');upload(e.dataTransfer.files[0])};
 $('#urdfFile').onchange=e=>upload(e.target.files[0]);
 async function upload(f){if(!f)return;const fd=new FormData();fd.append('file',f);drop.textContent='ingesting '+f.name+'…';const d=await api('/api/bodies/ingest',{method:'POST',body:fd});const t=setInterval(async()=>{const j=await api('/api/jobs/'+d.job_id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);drop.textContent=j.status==='done'?('registered: '+j.result.name+' ('+j.result.joints+' joints)'):('failed: '+j.error.slice(0,120));loadBodies()},1500)}
-(async()=>{try{const h=await api('/api/health');$('#health').textContent=`online · ${h.warm.device} · atlas ${h.warm.atlas_windows.toLocaleString()}`;await loadFams();await loadLib();await loadBodies();await loadRecent()}catch(e){$('#health').textContent='service offline';$('#health').style.color='var(--r)'}})();
+(async()=>{try{const h=await api('/api/health');$('#health').textContent=`online · ${h.warm.device} · atlas ${h.warm.atlas_windows.toLocaleString()}`;
+ if(h.viewer){$('#viserFrame').src=h.viewer;setTimeout(()=>$('#vpMsg').style.display='none',2000)}
+ renderTl();await loadFams();await loadLib();await loadBodies();await loadRecent()}catch(e){$('#health').textContent='service offline';$('#health').style.color='var(--r)'}})();
 </script></body></html>

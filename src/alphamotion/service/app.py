@@ -62,14 +62,18 @@ def create_app() -> FastAPI:
     @app.on_event("startup")
     async def _startup():
         from ..atlas.library import load_default as load_library
+        from ..config import CONFIG
+        from ..viz.live import LiveViewer
         state["warm"] = POOL.warm()
         state["library"] = load_library()
+        state["live"] = LiveViewer(CONFIG.viewer_ports[0])
 
     # ------------------------------------------------------------- meta -----
     @app.get("/api/health")
     def health():
         return {"ok": POOL.greenwich is not None, "warm": state["warm"],
-                "library": len(state["library"]) if state["library"] else 0}
+                "library": len(state["library"]) if state["library"] else 0,
+                "viewer": state["live"].url if state.get("live") else None}
 
     @app.get("/api/bodies")
     def bodies():
@@ -272,11 +276,12 @@ def create_app() -> FastAPI:
                     s.add(Asset(motion_id=motion_id, kind="mp4",
                                 path=str(results_dir() / mp4)))
                     s.commit()
-        if emb.xml and Path(emb.xml).exists():
+        if emb.xml and Path(emb.xml).exists() and state.get("live"):
             try:
-                out["viewer"] = _launch_viewer(tp, emb.xml, target_body)
-            except Exception:  # noqa: BLE001 — viewer is a bonus, not the job
-                pass
+                state["live"].set_trace(trace, emb.xml, target_body)
+                out["viewer"] = state["live"].url
+            except Exception as exc:  # noqa: BLE001 — viewer is a bonus
+                out["viewer_note"] = f"viewer update failed: {exc}"[:200]
         else:
             out["viewer_note"] = ("no mesh attached for this body; add it to "
                                   "robot_meshes.json to light up rendering")
