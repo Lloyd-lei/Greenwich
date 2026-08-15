@@ -186,13 +186,21 @@ def create_app() -> FastAPI:
         hspec, hdof, _hrest = POOL.human
         emb = registry.load(target_body)
         rot = gw.decode(codes, emb.spec, emb.dof)
-        # source reference for the adaptive refiner = decode on the human body
         rot_h = gw.decode(codes, hspec, hdof)
-        from ..refiner.refine import _wrist_indices
-        refiner = Refiner(emb.spec, emb.dof, emb.rest
-                          if emb.rest is not None else np.zeros(1), POOL.device)
-        refined, q, rrep = refiner.refine(
-            rot, rot_h[..., :6].cpu(), _wrist_indices(hspec.joint_names))
+        # RENDER PATH = raw decode + one global feasibility projection — the
+        # exact pipeline every accepted research video used. The refiner is
+        # OUT of the render path (owner call 0814: it dulled the look); the
+        # synergy gate below still scores the shipped motion as metadata.
+        Rg = rot6d_to_matrix(rot).double()
+        dof_t = torch.as_tensor(emb.dof, device=POOL.device,
+                                dtype=torch.float64)
+        rest_t = torch.as_tensor(emb.rest, device=POOL.device,
+                                 dtype=torch.float64)
+        r6_p, _pos_p, q = MP.project(Rg, emb.spec, dof_t, rest=rest_t,
+                                     method="global", lm_iters=20)
+        refined = rot                       # ship the decode itself
+        rrep = {"refiner": "bypassed (render uses raw decode + "
+                           "global projection)"}
         # SE3 constrained re-projection on requested spans
         for c in se3:
             Rg = rot6d_to_matrix(refined).double()
@@ -445,6 +453,12 @@ def create_app() -> FastAPI:
                 for m in rows]}
 
     if FRONTEND.exists():
+        @app.middleware("http")
+        async def _nocache(request, call_next):
+            resp = await call_next(request)
+            if request.url.path in ("/", "/index.html"):
+                resp.headers["Cache-Control"] = "no-cache"
+            return resp
         app.mount("/", StaticFiles(directory=FRONTEND, html=True),
                   name="frontend")
     return app

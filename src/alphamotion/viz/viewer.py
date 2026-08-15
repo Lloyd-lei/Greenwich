@@ -88,9 +88,17 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
         mid = model.geom_dataid[gid]
         va, vn = model.mesh_vertadr[mid], model.mesh_vertnum[mid]
         fa, fn = model.mesh_faceadr[mid], model.mesh_facenum[mid]
+        # use the robot's own material colors; a flat single-color blob reads
+        # terribly. Untextured default gray gets a papaya tint instead.
+        rgba = model.geom_rgba[gid]
+        if abs(float(rgba[0]) - 0.5) < 0.01 and abs(float(rgba[1]) - 0.5) < 0.01:
+            color = (232, 148, 60)
+        else:
+            color = tuple(int(255 * c) for c in rgba[:3])
         handles.append(server.scene.add_mesh_simple(
             f"/robot/m{i}", vertices=model.mesh_vert[va:va + vn],
-            faces=model.mesh_face[fa:fa + fn], color=(255, 128, 0)))
+            faces=model.mesh_face[fa:fa + fn], color=color,
+            flat_shading=False))
     frame = server.gui.add_slider("frame", min=0, max=T - 1, step=1,
                                   initial_value=0)
     play = server.gui.add_checkbox("play", initial_value=True)
