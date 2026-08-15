@@ -1,0 +1,49 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "alphamotion"
+version = "0.1.0"
+description = "Natively cross-embodiment motion generation with a navigable motion atlas"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+dependencies = [
+  "torch>=2.1",
+  "numpy>=1.24",
+  "scipy>=1.10",
+  "mujoco>=3.1",
+  "fastapi>=0.110",
+  "uvicorn>=0.27",
+  "pydantic>=2",
+  "sqlalchemy>=2",
+  "huggingface_hub>=0.20",
+  "platformdirs>=3",
+  "imageio>=2.31",
+  "imageio-ffmpeg>=0.4.9",
+  "viser>=0.2",
+  "pillow>=10",
+  "typer>=0.9",
+]
+
+[project.optional-dependencies]
+perception = ["requests>=2.31"]
+labeling = ["transformers>=4.40", "safetensors>=0.4"]
+dev = ["pytest>=8", "httpx>=0.27", "ruff>=0.4", "safetensors>=0.4"]
+
+[project.scripts]
+alphamotion = "alphamotion.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+alphamotion = ["assets/**/*", "frontend/**/*"]
+
+[tool.pytest.ini_options]
+markers = [
+  "gpu: needs CUDA + downloaded weights",
+  "slow: long-running",
+]
+addopts = "-m 'not gpu and not slow'"

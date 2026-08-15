@@ -1,0 +1,8 @@
+# conda env for AlphaMotion (Linux / Windows 11)
+name: alphamotion
+channels: [conda-forge]
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - -e .[dev,labeling]
