@@ -1,0 +1,156 @@
+"""User URDF ingest: parse -> check -> label -> refiner config, one report.
+
+Every step reports honestly; nothing is silently "fixed". The output is an
+ingest report dict plus (on success) a registered embodiment the engine can
+decode onto zero-shot.
+
+Steps:
+  1. parse/compile: MjSpec.from_file(urdf); URDF has no floating base, so a
+     freejoint is injected at the first body (verified route);
+  2. descriptor: the exact MJCF pipeline the bundled robots went through
+     (build_merge/build_spec/mjcf_dof) — same code path, no special-casing;
+  3. limit check: missing limits, zero-span joints, non-hinge joints,
+     DOF census;
+  4. semantic labeling: Qwen3 joint-name embeddings (the encoder the released
+     Greenwich was trained with) + geometric fallback for the five key parts;
+  5. refiner config: wrist chains + limits, persisted with the skeleton.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import numpy as np
+
+from ..paths import data_dir
+from .registry import user_dir
+
+
+def urdf_to_mjcf(urdf_path: str | Path, name: str) -> Path:
+    """URDF -> compilable MJCF with an injected floating base."""
+    import mujoco
+    urdf_path = Path(urdf_path).resolve()
+    spec = mujoco.MjSpec.from_file(str(urdf_path))
+    # URDF mesh references are relative to the URDF's own directory; the MJCF
+    # we persist lives elsewhere, so anchor meshdir absolutely or the compile
+    # of the saved file dies with "Error opening file 'meshes/...'"
+    md = getattr(spec, "meshdir", "") or ""
+    if not Path(md).is_absolute():
+        spec.meshdir = str((urdf_path.parent / md).resolve())
+    bodies = spec.bodies
+    if len(bodies) < 2:
+        raise ValueError("URDF has no articulated bodies")
+    root = bodies[1]
+    has_free = any(j.type == mujoco.mjtJoint.mjJNT_FREE
+                   for b in bodies for j in b.joints)
+    if not has_free:
+        root.add_freejoint()
+    model = spec.compile()          # raises with a real error message if broken
+    out = user_dir() / f"{name}.xml"
+    xml = spec.to_xml()
+    out.write_text(xml)
+    return out
+
+
+def limit_check(model) -> dict:
+    """Joint-limit census on the compiled model."""
+    import mujoco
+    issues, hinges, unlimited, zero_span = [], 0, [], []
+    for j in range(model.njnt):
+        jt = model.jnt_type[j]
+        nm = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_JOINT, j) or f"joint{j}"
+        if jt == mujoco.mjtJoint.mjJNT_FREE:
+            continue
+        if jt != mujoco.mjtJoint.mjJNT_HINGE:
+            issues.append(f"non-hinge joint '{nm}' "
+                          f"(type {int(jt)}) — treated as fixed by the codec")
+            continue
+        hinges += 1
+        if not model.jnt_limited[j]:
+            unlimited.append(nm)
+        else:
+            lo, hi = model.jnt_range[j]
+            if hi - lo < 1e-6:
+                zero_span.append(nm)
+    return {"hinge_dofs": hinges,
+            "unlimited_joints": unlimited,
+            "zero_span_joints": zero_span,
+            "other_issues": issues,
+            "ok": not zero_span}
+
+
+def semantic_labels(spec, device: str = "cuda") -> dict:
+    """Per-joint part labels: Qwen3 name-embedding nearest-anchor vote with a
+    geometric fallback (key_joints) when names carry no signal."""
+    import torch
+
+    from ..engine.spatial import key_joints
+    from .semantics_map import build_name_embeddings, embed_matrix
+    anchors = {
+        "head": "the head joint of a body",
+        "left arm": "the left arm joint of a body",
+        "right arm": "the right arm joint of a body",
+        "left leg": "the left leg joint of a body",
+        "right leg": "the right leg joint of a body",
+        "torso": "the torso joint of a body",
+    }
+    labels: dict[str, str] = {}
+    method = "qwen3"
+    try:
+        lut = build_name_embeddings(list(spec.joint_names)
+                                    + list(anchors.values()), device=device)
+        J = embed_matrix(spec.joint_names, lut)              # [J,1024]
+        A = embed_matrix(list(anchors.values()), lut)        # [6,1024]
+        sim = J @ A.T
+        for i, n in enumerate(spec.joint_names):
+            labels[n] = list(anchors)[int(sim[i].argmax())]
+    except Exception:
+        method = "geometric-fallback"
+    # geometric key joints always annotated on top (they anchor the QC metrics)
+    kj, knames, tags = key_joints(spec)
+    keymap = dict(zip(("root", "head", "l_wrist", "r_wrist",
+                       "l_ankle", "r_ankle"), knames))
+    return {"per_joint": labels, "key_joints": keymap, "method": method}
+
+
+def ingest(urdf_path: str | Path, name: str | None = None,
+           device: str = "cuda") -> dict:
+    import mujoco
+
+    from ..engine.descriptor import build_from_mjcf
+    urdf_path = Path(urdf_path)
+    name = name or urdf_path.stem.lower().replace("-", "_")
+    report: dict = {"name": name, "source": str(urdf_path)}
+
+    # 1-2: parse + descriptor
+    xml = urdf_to_mjcf(urdf_path, name)
+    report["mjcf"] = str(xml)
+    spec, dof, rest, qn, _ = build_from_mjcf(xml, name)
+    report["joints"] = spec.J
+    report["height_cm"] = round(spec.height, 1)
+
+    # 3: limits
+    model = mujoco.MjModel.from_xml_path(str(xml))
+    report["limits"] = limit_check(model)
+
+    # 4: labels
+    report["semantics"] = semantic_labels(spec, device)
+
+    # 5: refiner config + persist
+    wrists = [n for n in spec.joint_names
+              if "wrist" in n.lower() or n.lower().endswith("hand")]
+    refiner_cfg = {"wrist_joints": wrists, "wrist_alpha": 0.65, "lm_iters": 20}
+    report["refiner"] = refiner_cfg
+
+    u = user_dir()
+    np.savez(u / f"{name}_spec.npz", name=spec.name, parents=spec.parents,
+             rest_offsets=spec.rest_offsets, joint_names=spec.joint_names,
+             norm_bonelen=spec.norm_bonelen, height=spec.height)
+    np.savez(u / f"{name}_dof.npz", dof=dof, rest=rest)
+    (u / f"{name}_meta.json").write_text(json.dumps(
+        {"source": "user_urdf", "xml": str(xml),
+         "qnames": [",".join(x) for x in (qn or [])],
+         "semantics": report["semantics"], "refiner": refiner_cfg,
+         "limits": report["limits"]}, indent=1))
+    report["registered"] = True
+    return report
