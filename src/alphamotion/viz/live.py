@@ -133,8 +133,9 @@ class LiveViewer:
         while True:
             try:
                 if self._play.value and self._pos is not None:
-                    self._frame.value = \
-                        (int(self._frame.value) + 1) % len(self._pos)
+                    t = (int(self._frame.value) + 1) % len(self._pos)
+                    self._frame.value = t     # server-side assignment does NOT
+                    self._show(t)             # fire on_update — drive directly
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(1.0 / max(self._fps * self._speed.value, 1.0))

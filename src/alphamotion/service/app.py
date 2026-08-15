@@ -192,20 +192,20 @@ def create_app() -> FastAPI:
         emb = registry.load(target_body)
         rot = gw.decode(codes, emb.spec, emb.dof)
         rot_h = gw.decode(codes, hspec, hdof)
-        # RENDER PATH = raw decode + one global feasibility projection — the
-        # exact pipeline every accepted research video used. The refiner is
-        # OUT of the render path (owner call 0814: it dulled the look); the
-        # synergy gate below still scores the shipped motion as metadata.
+        # RENDER PATH = the raw spatial-token decode, nothing else (owner
+        # call 0814: no refinement of any kind). fit_angles(clamp=False,
+        # greedy) is a pure kinematic CONVERSION of the decoded global
+        # rotations into the mesh's hinge coordinates — no optimisation, no
+        # limit clamping, no smoothing.
         Rg = rot6d_to_matrix(rot).double()
         dof_t = torch.as_tensor(emb.dof, device=POOL.device,
                                 dtype=torch.float64)
         rest_t = torch.as_tensor(emb.rest, device=POOL.device,
                                  dtype=torch.float64)
-        r6_p, _pos_p, q = MP.project(Rg, emb.spec, dof_t, rest=rest_t,
-                                     method="global", lm_iters=20)
+        q, _ = MP.fit_angles(Rg, emb.spec, dof_t, rest=rest_t,
+                             clamp=False, method="greedy")
         refined = rot                       # ship the decode itself
-        rrep = {"refiner": "bypassed (render uses raw decode + "
-                           "global projection)"}
+        rrep = {"refiner": "none (raw spatial-token decode)"}
         # SE3 constrained re-projection on requested spans
         for c in se3:
             Rg = rot6d_to_matrix(refined).double()
