@@ -156,21 +156,28 @@ def create_app() -> FastAPI:
         return FileResponse(p)
 
     # ---------------------------------------------------------- pipeline ----
-    def _segment_codes(seg: Segment, eq, lib):
-        """One timeline segment -> (codes [n,256,20] on device).
+    def _segment_codes(seg: Segment, eq, lib, target_body: str | None = None):
+        """One timeline segment -> (codes [n,256,20] on device, name,
+        root [n,3] cm Y-up | None).
 
         Playback = the window's RAW corpus codes (bit-faithful). n != window
-        retimes by index resampling BOTH streams. Only pinned segments run the
-        A3 pose-stream regeneration — and even then the rotation stream stays
-        raw (A3 never learned it; 0814 audit)."""
+        retimes by index resampling BOTH streams and the root trajectory.
+        Only pinned segments run the A3 pose-stream regeneration — and even
+        then the rotation stream stays raw (A3 never learned it; 0814 audit).
+        The root trajectory is DATA passthrough (owner design: first frame =
+        origin), never inferred."""
         if seg.kind == "library":
             tok, bounds, name, fam = lib.entry(seg.library_id)
             raw = torch.from_numpy(
                 lib.raw_codes(seg.library_id).astype(np.int64))
+            root = lib.root_delta(seg.library_id, target_body or "") \
+                if target_body else None
             if seg.n != raw.shape[0]:
                 ridx = np.round(np.linspace(
                     0, raw.shape[0] - 1, seg.n)).astype(np.int64)
                 raw = raw[ridx]
+                if root is not None:
+                    root = root[ridx]
             raw = raw.to(eq.device)
             if seg.pins:
                 tokens = torch.from_numpy(tok).to(eq.device)
@@ -178,8 +185,8 @@ def create_app() -> FastAPI:
                     tokens[int(slot)] = int(val)
                 ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
                 return eq.detokenize(tokens, ep, seg.n,
-                                     rot_codes=raw[:, 128:]), name
-            return raw, name
+                                     rot_codes=raw[:, 128:]), name, root
+            return raw, name, root
         raise ValueError(f"segment kind '{seg.kind}' not handled here")
 
     def _bridge_codes(eq, prev_codes, next_codes, n, seed, temperature):
@@ -200,7 +207,7 @@ def create_app() -> FastAPI:
                                  [prev_codes[-1], next_codes[0]]))
 
     def _finalize(codes, target_body, title, source, prompt=None,
-                  parent=None, render=True, fps=30.0, se3=()):
+                  parent=None, render=True, fps=30.0, se3=(), root_t=None):
         """codes -> decode -> refine -> gate -> QC -> trace -> DB -> atlas."""
         from ..embodiment import registry
         from ..engine import constraints as MP
@@ -254,16 +261,19 @@ def create_app() -> FastAPI:
         # trace + assets
         gp = fk_pos(refined.cpu().numpy(), emb.spec)
         rootR = rot6d_to_matrix(refined[:, 0:1, :6]).cpu().numpy()[:, 0]
-        # world translation is NOT computed here: stride odometry must run in
-        # the renderer's own frame (viz/video, viz/live), on the posed mesh —
-        # every cache-frame variant integrated 15-85 deg off (0814 audit).
+        # world translation: DATA passthrough when the source carries a root
+        # trajectory (owner design — window's first frame = world origin);
+        # renderers fall back to contact-derived stride odometry only when
+        # root_t is absent (e.g. generated interiors with no data trajectory).
         stage = np.ones(len(refined), np.int32)
         mid_title = title or f"{source}-{int(time.time())}"
         trace = MotionTrace(q=q.detach().cpu().numpy(), rootR=rootR, gp=gp,
                             stage=stage, fps=fps, title=mid_title,
                             target=target_body,
                             tokens=tok_final.cpu().numpy(),
-                            joint_names=list(emb.spec.joint_names))
+                            joint_names=list(emb.spec.joint_names),
+                            root_t=None if root_t is None
+                            else np.asarray(root_t, np.float64))
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family_of(prompt or mid_title)
@@ -335,9 +345,10 @@ def create_app() -> FastAPI:
                 eq = POOL.equator
                 seg = Segment(kind="library", library_id=req.library_id,
                               n=req.n or lib.window)
-                codes, name = _segment_codes(seg, eq, lib)
+                codes, name, root = _segment_codes(seg, eq, lib,
+                                                   req.target_body)
                 return _finalize(codes, req.target_body, name, "library",
-                                 render=req.render)
+                                 render=req.render, root_t=root)
             return await POOL.run(work)
         return {"job_id": _submit("play", req.model_dump(), run)}
 
@@ -353,34 +364,49 @@ def create_app() -> FastAPI:
                 chunks, names = [], []
                 for seg in req.segments:
                     if seg.kind == "gap":
-                        chunks.append(("gap", seg))
+                        chunks.append(("gap", seg, None))
                         continue
                     if seg.kind in ("prompt", "video"):
                         codes = _perception_codes(seg)
-                        chunks.append(("codes", codes))
+                        chunks.append(("codes", codes, None))
                         names.append(seg.text or seg.video_asset or "clip")
                         continue
-                    codes, name = _segment_codes(seg, eq, lib)
-                    chunks.append(("codes", codes))
+                    codes, name, root = _segment_codes(seg, eq, lib,
+                                                       req.target_body)
+                    chunks.append(("codes", codes, root))
                     names.append(name)
-                # resolve gaps between neighbouring code chunks
-                out = []
-                for i, (kind, val) in enumerate(chunks):
+                # resolve gaps between neighbouring code chunks; chain the
+                # root trajectory across segments (each window's deltas are
+                # first-frame-anchored -> re-anchor at the running end;
+                # gaps hold position — continuity over contact, owner call)
+                out, roots = [], []
+                anchor = np.zeros(3)
+                have_root = all(c[2] is not None
+                                for c in chunks if c[0] == "codes")
+                for i, (kind, val, root) in enumerate(chunks):
                     if kind == "codes":
                         out.append(val)
+                        if have_root:
+                            roots.append(anchor + root)
+                            anchor = anchor + root[-1]
                         continue
                     prev = out[-1] if out else None
-                    nxt = next((v for k, v in chunks[i + 1:] if k == "codes"),
-                               None)
+                    nxt = next((v for k, v, _r in chunks[i + 1:]
+                                if k == "codes"), None)
                     if prev is None or nxt is None:
                         raise ValueError("gap segment needs neighbours on "
                                          "both sides")
                     out.append(_bridge_codes(eq, prev, nxt, val.n, val.seed,
                                              val.temperature))
+                    if have_root:
+                        roots.append(np.tile(anchor, (val.n, 1)))
                 codes = torch.cat(out, 0)
+                root_t = np.concatenate(roots, 0) if have_root and roots \
+                    else None
                 title = req.title or " + ".join(n[:24] for n in names[:3])
                 return _finalize(codes, req.target_body, title, "edit",
-                                 render=req.render, fps=req.fps, se3=req.se3)
+                                 render=req.render, fps=req.fps, se3=req.se3,
+                                 root_t=root_t)
             return await POOL.run(work)
         return {"job_id": _submit("timeline", req.model_dump(), run)}
 

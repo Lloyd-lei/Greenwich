@@ -102,11 +102,16 @@ class LiveViewer:
                 wxyz[t, i] = Rotation.from_matrix(
                     data.geom_xmat[gid].reshape(3, 3)).as_quat(
                         scalar_first=True)
-        # stride odometry in the FINAL frame (cache-frame integration lands
-        # 15-85 deg off after axis conjugation — 0814 audit): shift every geom
-        # by the stance-pinning offset. Poses are rigid, so translation is
-        # exact here.
-        if len(fb):
+        # world translation: DATA root trajectory when the trace carries one
+        # (owner design — first frame = origin; continuity beats contact;
+        # world-vector map (x,y,z) Y-up -> (z,x,y) Z-up, measured on three GT
+        # windows). Contact-derived stride odometry only as fallback.
+        if getattr(trace, "root_t", None) is not None:
+            off = np.stack([trace.root_t[:, 2], trace.root_t[:, 0]],
+                           1) / 100.0
+            pos[:, :, 0] += off[:, 0:1].astype(np.float32)
+            pos[:, :, 1] += off[:, 1:2].astype(np.float32)
+        elif len(fb):
             off = stance_offsets(fw)
             pos[:, :, 0] += off[:, 0:1].astype(np.float32)
             pos[:, :, 1] += off[:, 1:2].astype(np.float32)

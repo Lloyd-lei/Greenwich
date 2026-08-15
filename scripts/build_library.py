@@ -73,9 +73,35 @@ def main() -> None:
         packed[i, :, :128] = pw[..., 0::2] | (pw[..., 1::2] << 4)
         packed[i, :, 128:] = np.ascontiguousarray(cr[win])       # already packed
 
+    # root trajectory passthrough (owner design: first frame = world origin,
+    # deltas carried alongside the codes; the codec itself is root-relative).
+    # Stored for every embodiment that has GMR ground truth + human.
+    RW_BODIES = ["human_smpl", "unitree_g1_29dof", "unitree_h1",
+                 "booster_t1", "fourier_gr3", "tienkung"]
+    rws = {}
+    for b in RW_BODIES:
+        p = Path(f"/var/tmp/alphamotion/topo_exp/cache_xwbc_amass_full/"
+                 f"{b}_root_world.pt")
+        if p.exists():
+            import torch as _t
+            rws[b] = _t.load(p, mmap=True)
+    root_delta = np.zeros((len(picked), len(RW_BODIES), idx.window, 3),
+                          np.float16)
+    for i, w in enumerate(picked):
+        ci, st_rel = int(idx.clip[w]), int(idx.start[w])
+        st = seqs[ci]["start"] + st_rel
+        for bi, b in enumerate(RW_BODIES):
+            if b in rws:
+                p = rws[b][st:st + idx.window].numpy().astype(np.float64)
+                root_delta[i, bi] = (p - p[0]).astype(np.float16)  # cm, Y-up
+
     out = AM / "weights_staging" / "library"
     out.mkdir(parents=True, exist_ok=True)
     np.save(out / "library_codes.npy", packed)   # .npy: mmap-able at load
+    np.save(out / "library_root.npy", root_delta)
+    (out / "library_root_meta.json").write_text(json.dumps(
+        {"bodies": RW_BODIES, "units": "cm", "basis": "Y-up",
+         "anchor": "first frame of window = origin"}))
     np.savez_compressed(out / "library.npz",
                         tokens=idx.tokens[picked].astype(np.int32),
                         bounds=bounds,

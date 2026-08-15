@@ -89,13 +89,17 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
                     data.qpos[tab[j, k]] = tr.q[t, sj, k]
         mj.mj_forward(model, data)
 
-    # pass 1 — FK only, feet in the FINAL world frame. Stride odometry must
-    # run HERE, not in the cache frame: the Y-up->Z-up conjugation does not
-    # commute with the root rotation (measured 15-85 deg direction error when
-    # integrated upstream; 0.20 cm/frame stance slide when integrated here).
+    # world translation. Preferred: the trace's DATA root trajectory (owner
+    # design — first frame = origin; trajectory continuity beats foot
+    # contact, foot skate/clip accepted). World-vector map measured on three
+    # GT windows: (x,y,z) Y-up -> (z,x,y) render Z-up (constant permutation;
+    # NOT @AX, NOT the rotation conjugation — those landed 80-100 deg off).
+    # Fallback: contact-derived stride odometry on the posed mesh.
     from ..engine.odometry import foot_bodies, stance_offsets
     off = np.zeros((tr.frames, 2))
-    if root_adr >= 0:
+    if getattr(tr, "root_t", None) is not None:
+        off = np.stack([tr.root_t[:, 2], tr.root_t[:, 0]], 1) / 100.0
+    elif root_adr >= 0:
         fb = foot_bodies(model)
         fw = np.zeros((tr.frames, len(fb), 3))
         for t in range(tr.frames):

@@ -32,6 +32,12 @@ class Library:
         # mmap: 4096 windows x 60f x 256 slots x 10 packed bytes ~ 630 MB
         self._packed = np.load(codes_npy, mmap_mode="r") \
             if codes_npy.exists() else None
+        root_npy = npz_path.parent / "library_root.npy"
+        self._root = np.load(root_npy, mmap_mode="r") \
+            if root_npy.exists() else None
+        rm = npz_path.parent / "library_root_meta.json"
+        self._root_bodies = json.loads(rm.read_text())["bodies"] \
+            if rm.exists() else []
 
     def __len__(self) -> int:
         return len(self.tokens)
@@ -51,6 +57,24 @@ class Library:
         out[..., 0::2] = pk & 0x0F
         out[..., 1::2] = (pk >> 4) & 0x0F
         return out
+
+    def root_delta(self, i: int, body: str,
+                   body_reach: float | None = None,
+                   human_reach: float | None = None):
+        """[window,3] cm Y-up — the window's root trajectory, first frame =
+        origin (owner design: data passthrough, not inference). Exact for
+        bodies with GMR ground truth; otherwise the human trajectory scaled
+        by reach ratio. None if this library predates root storage."""
+        if self._root is None:
+            return None
+        if body in self._root_bodies:
+            return np.asarray(self._root[int(i),
+                              self._root_bodies.index(body)], np.float64)
+        hu = np.asarray(self._root[int(i),
+                        self._root_bodies.index("human_smpl")], np.float64)
+        s = (body_reach / human_reach) \
+            if body_reach and human_reach else 1.0
+        return hu * s
 
     def search(self, q: str = "", family: str = "", offset: int = 0,
                limit: int = 24) -> dict:
