@@ -254,21 +254,16 @@ def create_app() -> FastAPI:
         # trace + assets
         gp = fk_pos(refined.cpu().numpy(), emb.spec)
         rootR = rot6d_to_matrix(refined[:, 0:1, :6]).cpu().numpy()[:, 0]
-        # world translation from the POSITION head via stride odometry — the
-        # representation is root-relative by design; this is where locomotion
-        # gets its displacement back.
-        from ..engine.odometry import stride_odometry
-        reach_cm = float(np.linalg.norm(gp, axis=-1).max())
-        gp_head = pos_n.detach().cpu().numpy() * reach_cm
-        root_t = stride_odometry(gp_head, list(emb.spec.joint_names), fps)
+        # world translation is NOT computed here: stride odometry must run in
+        # the renderer's own frame (viz/video, viz/live), on the posed mesh —
+        # every cache-frame variant integrated 15-85 deg off (0814 audit).
         stage = np.ones(len(refined), np.int32)
         mid_title = title or f"{source}-{int(time.time())}"
         trace = MotionTrace(q=q.detach().cpu().numpy(), rootR=rootR, gp=gp,
                             stage=stage, fps=fps, title=mid_title,
                             target=target_body,
                             tokens=tok_final.cpu().numpy(),
-                            joint_names=list(emb.spec.joint_names),
-                            root_t=root_t)
+                            joint_names=list(emb.spec.joint_names))
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family_of(prompt or mid_title)

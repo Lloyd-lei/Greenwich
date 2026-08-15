@@ -72,18 +72,12 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
     cam.lookat[:] = [0, 0, h0 * 0.55]
     cam.distance, cam.elevation, cam.azimuth = 3.1 * h0, -10, 160
 
-    rend = mj.Renderer(model, height=height, width=width)
-    frames = np.zeros((tr.frames, height, width, 3), np.uint8)
-    for t in range(tr.frames):
+    def pose_at(t, off_xy):
         data.qpos[:] = model.qpos0
         if root_adr >= 0:
             pm = tr.gp[t] @ AX / 100.0
-            rt = (tr.root_t[t] @ AX / 100.0) \
-                if getattr(tr, "root_t", None) is not None else np.zeros(3)
             data.qpos[root_adr:root_adr + 3] = \
-                [rt[0], rt[1], -float(pm[:, 2].min())]
-            if follow:
-                cam.lookat[0], cam.lookat[1] = rt[0], rt[1]
+                [off_xy[0], off_xy[1], -float(pm[:, 2].min())]
             data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
                 AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
         for j in range(spec.J):
@@ -94,6 +88,29 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
                 if tab[j, k] >= 0:
                     data.qpos[tab[j, k]] = tr.q[t, sj, k]
         mj.mj_forward(model, data)
+
+    # pass 1 — FK only, feet in the FINAL world frame. Stride odometry must
+    # run HERE, not in the cache frame: the Y-up->Z-up conjugation does not
+    # commute with the root rotation (measured 15-85 deg direction error when
+    # integrated upstream; 0.20 cm/frame stance slide when integrated here).
+    from ..engine.odometry import foot_bodies, stance_offsets
+    off = np.zeros((tr.frames, 2))
+    if root_adr >= 0:
+        fb = foot_bodies(model)
+        fw = np.zeros((tr.frames, len(fb), 3))
+        for t in range(tr.frames):
+            pose_at(t, (0.0, 0.0))
+            for i, b in enumerate(fb):
+                fw[t, i] = data.xpos[b]
+        off = stance_offsets(fw)
+
+    # pass 2 — render with the walk
+    rend = mj.Renderer(model, height=height, width=width)
+    frames = np.zeros((tr.frames, height, width, 3), np.uint8)
+    for t in range(tr.frames):
+        pose_at(t, off[t])
+        if follow:
+            cam.lookat[0], cam.lookat[1] = off[t]
         rend.update_scene(data, cam)
         frames[t] = rend.render()
     del rend

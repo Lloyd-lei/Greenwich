@@ -76,15 +76,15 @@ class LiveViewer:
         T = trace.frames
         pos = np.zeros((T, len(gids), 3), np.float32)
         wxyz = np.zeros((T, len(gids), 4), np.float32)
+        from ..engine.odometry import foot_bodies, stance_offsets
+        fb = foot_bodies(model) if root_adr >= 0 else []
+        fw = np.zeros((T, len(fb), 3))
         for t in range(T):
             data.qpos[:] = model.qpos0
             if root_adr >= 0:
                 pm = trace.gp[t] @ AX / 100.0
-                rt = (trace.root_t[t] @ AX / 100.0) \
-                    if getattr(trace, "root_t", None) is not None \
-                    else np.zeros(3)
                 data.qpos[root_adr:root_adr + 3] = \
-                    [rt[0], rt[1], -float(pm[:, 2].min())]
+                    [0, 0, -float(pm[:, 2].min())]
                 data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
                     AX.T @ trace.rootR[t] @ AX).as_quat(scalar_first=True)
             for j in range(spec.J):
@@ -95,11 +95,21 @@ class LiveViewer:
                     if tab[j, k] >= 0:
                         data.qpos[tab[j, k]] = trace.q[t, sj, k]
             mj.mj_forward(model, data)
+            for i, b in enumerate(fb):
+                fw[t, i] = data.xpos[b]
             for i, gid in enumerate(gids):
                 pos[t, i] = data.geom_xpos[gid]
                 wxyz[t, i] = Rotation.from_matrix(
                     data.geom_xmat[gid].reshape(3, 3)).as_quat(
                         scalar_first=True)
+        # stride odometry in the FINAL frame (cache-frame integration lands
+        # 15-85 deg off after axis conjugation — 0814 audit): shift every geom
+        # by the stance-pinning offset. Poses are rigid, so translation is
+        # exact here.
+        if len(fb):
+            off = stance_offsets(fw)
+            pos[:, :, 0] += off[:, 0:1].astype(np.float32)
+            pos[:, :, 1] += off[:, 1:2].astype(np.float32)
 
         with self._lock:
             for h in self._handles:
