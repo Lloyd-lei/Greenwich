@@ -18,8 +18,9 @@ def setup_gl_backend() -> None:
     """Platform-conditional GL selection for MuJoCo offscreen rendering.
 
     Linux headless -> EGL; Windows -> leave unset (WGL default); macOS -> cgl.
-    Must be called BEFORE importing mujoco in a rendering process, and never
-    in the API gateway process.
+    Must be called BEFORE importing mujoco. The API gateway calls this during
+    module initialization because its persistent viewer and MP4 exporter both
+    use MuJoCo in the warm process.
     """
     if "MUJOCO_GL" in os.environ:
         return

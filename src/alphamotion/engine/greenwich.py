@@ -20,6 +20,21 @@ from .nets.rotations import SkeletonSpec
 from .spatial import build_global, fk_pos
 
 SEM_DIM = {"siglip": 768, "qwen3": 1024}
+RELEASE_CONTRACT = {
+    "n_latent": 128, "fsq_stages": 1,
+    "fsq_levels": "8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8",
+    "d_model": 256, "n_heads": 8, "enc_layers": 4, "dec_layers": 4,
+    "sem_encoder": "qwen3", "use_dof": True, "rot_head": "free",
+}
+
+
+def _validate_release_config(cfg: dict) -> None:
+    bad = {key: (cfg.get(key), expected)
+           for key, expected in RELEASE_CONTRACT.items()
+           if cfg.get(key) != expected}
+    if bad:
+        raise ValueError(f"Greenwich checkpoint does not match the locked "
+                         f"AlphaMotion release contract: {bad}")
 
 
 def build_model(cfg: dict, device: str) -> DualTranslator:
@@ -60,9 +75,10 @@ class Greenwich:
         device = device or CONFIG.device
         run = Path(run_dir) if run_dir else resolve("greenwich")
         cfg = json.load(open(run / "config.json"))
+        _validate_release_config(cfg)
         model = build_model(cfg, device)
         sd = _load_state(run)
-        model.load_state_dict(sd, strict=False)
+        model.load_state_dict(sd, strict=True)
         model.eval()
         return cls(model, cfg, device)
 

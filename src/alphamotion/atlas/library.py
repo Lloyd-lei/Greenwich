@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .families import FAMILIES
+from .families import FAMILIES, family_of
 
 
 class Library:
@@ -26,7 +26,11 @@ class Library:
         self.bounds = d["bounds"]
         meta = json.loads((npz_path.parent / "library_meta.json").read_text())
         self.names = meta["clips"]
-        self.families = meta["families"]
+        # Old library builds used an unbounded ``hop`` regex and silently
+        # classified names such as ``knife_chop`` as jumps. Names are the
+        # durable source of truth, so repair labels at load time as well as in
+        # future builders.
+        self.families = [family_of(name) for name in self.names]
         self.window = meta.get("window", 60)
         codes_npy = npz_path.parent / "library_codes.npy"
         # mmap: 4096 windows x 60f x 256 slots x 10 packed bytes ~ 630 MB
@@ -85,14 +89,61 @@ class Library:
             if q and q.lower() not in self.names[i].lower():
                 continue
             rows.append(i)
+        # A clip-level label does not guarantee every 60-frame crop contains
+        # the named event. For jump browsing, rank windows by measured root
+        # elevation so the product shows actual airborne windows first.
+        if family == "jump" and self._root is not None:
+            rows.sort(key=lambda i: self.motion_metrics(i)["vertical_range_cm"],
+                      reverse=True)
         page = rows[offset:offset + limit]
         return {"total": len(rows), "items": [
-            {"id": int(i), "name": self.names[i], "family": self.families[i]}
+            {"id": int(i), "name": self.names[i], "family": self.families[i],
+             **self.motion_metrics(i)}
             for i in page]}
+
+    def motion_metrics(self, i: int) -> dict:
+        """Cheap source-trajectory diagnostics for library selection."""
+        if self._root is None or "human_smpl" not in self._root_bodies:
+            return {"vertical_range_cm": None, "path_m": None}
+        root = np.asarray(
+            self._root[int(i), self._root_bodies.index("human_smpl")],
+            np.float64)
+        vertical = float(np.ptp(root[:, 1]))
+        horizontal = root[:, [0, 2]]
+        path_m = float(np.linalg.norm(np.diff(horizontal, axis=0),
+                                      axis=1).sum() / 100.0)
+        return {"vertical_range_cm": round(vertical, 2),
+                "path_m": round(path_m, 3)}
 
     def entry(self, i: int):
         return (self.tokens[int(i)], self.bounds[int(i)],
                 self.names[int(i)], self.families[int(i)])
+
+    def resolve_portal(self, clip: str, tokens: np.ndarray) -> int | None:
+        """Resolve an Atlas hit to a playable raw-code library row.
+
+        Some historical Atlas builds stored clip labels in a fixed-width
+        string column, so otherwise valid labels can be truncated. Generated
+        Atlas rows may also use a user-facing title instead of the source clip
+        name. Prefer an unambiguous label match, then accept only a bit-exact
+        32-token match. We deliberately do not map merely similar tokens to a
+        raw clip: doing so would make the portal button promise a destination
+        that the index did not actually identify.
+        """
+        exact = [i for i, name in enumerate(self.names) if name == clip]
+        if exact:
+            return exact[0]
+
+        prefix = [i for i, name in enumerate(self.names)
+                  if name.startswith(clip) or clip.startswith(name)]
+        if len(prefix) == 1:
+            return prefix[0]
+
+        query = np.asarray(tokens, dtype=self.tokens.dtype)
+        if query.shape != (self.tokens.shape[1],):
+            return None
+        matches = np.flatnonzero(np.all(self.tokens == query[None], axis=1))
+        return int(matches[0]) if len(matches) else None
 
 
 def load_default() -> Library:

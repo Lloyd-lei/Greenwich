@@ -4,8 +4,9 @@ Product variables (owner's spec): embodiment skeleton assets, motion FAMILY,
 DURATION, and data SOURCE — the source axis is what turns user uploads into a
 growing training corpus for future model versions.
 
-Write discipline: all writes go through the job runner (single writer); the
-API layer only reads.
+Generated-motion writes go through the serialized job runner. Small metadata
+writes for validated uploads and skeleton registration use short WAL
+transactions in the API process.
 """
 from __future__ import annotations
 

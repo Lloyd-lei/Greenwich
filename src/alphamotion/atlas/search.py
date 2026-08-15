@@ -26,7 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .families import FAMILIES
+from .families import FAMILIES, family_id
 
 
 class AtlasIndex:
@@ -38,6 +38,11 @@ class AtlasIndex:
         self.start = start.astype(np.int32)
         self.family = family.astype(np.int16)
         self.clips = list(clips)
+        # Recompute frozen labels from clip names. This also repairs atlases
+        # built before the word-boundary fix for ``hop``/``chop``.
+        self.family = np.asarray(
+            [family_id(self.clips[int(c)]) for c in self.clip],
+            dtype=np.int16)
         self.window, self.stride = window, stride
         self.frozen = len(tokens)              # corpus prefix, never evicted
         self.capacity = capacity or max(2 * self.frozen, self.frozen + 4096)
@@ -61,6 +66,7 @@ class AtlasIndex:
                     [(w, sl) for (w, sl) in lst if w != evict]
             self.tokens[evict] = np.asarray(tokens, np.int32)
             self.clip[evict] = len(self.clips)
+            self.start[evict] = 0
             self.family[evict] = family_idx
             self.clips.append(name)
             w = evict
@@ -74,6 +80,10 @@ class AtlasIndex:
         self._ring.append(w)
         for s in range(32):
             self.post[int(self.tokens[w, s])].append((w, s))
+        # Ring replacement keeps the same table length, so the lazy histogram
+        # cache cannot detect the mutation by shape alone.
+        if hasattr(self, "_H"):
+            del self._H
         return w
 
     # ------------------------------------------------------------- queries --
@@ -145,7 +155,8 @@ class AtlasIndex:
         np.savez_compressed(path, tokens=self.tokens, clip=self.clip,
                             start=self.start, family=self.family)
         meta = {"clips": self.clips, "window": self.window,
-                "stride": self.stride, "frozen": self.frozen}
+                "stride": self.stride, "frozen": self.frozen,
+                "capacity": self.capacity}
         (path.parent / "atlas_meta.json").write_text(json.dumps(meta))
 
     @classmethod
@@ -154,8 +165,10 @@ class AtlasIndex:
         d = np.load(npz_path)
         meta = json.loads((npz_path.parent / "atlas_meta.json").read_text())
         idx = cls(d["tokens"], d["clip"], d["start"], d["family"],
-                  meta["clips"], meta.get("window", 60), meta.get("stride", 30))
+                  meta["clips"], meta.get("window", 60),
+                  meta.get("stride", 30), meta.get("capacity"))
         idx.frozen = meta.get("frozen", len(d["tokens"]))
+        idx._ring = list(range(idx.frozen, len(idx.tokens)))
         return idx
 
 

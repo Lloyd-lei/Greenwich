@@ -1,14 +1,14 @@
 # AlphaMotion Benchmark
 
-Release gate: ALL GREEN — 2026-08-14
+Release gate: ALL GREEN — 2026-08-15
 
 | metric | value | bar | pass |
 |---|---|---|---|
 | reencode_fidelity | 0.639 | 0.50 | ✅ |
 | follow_score | 0.416 | 0.30 | ✅ |
 | amplitude_ratio(info) | 1.170 | 0.00 | ✅ |
-| atlas_precision_x | 6.053 | 5.00 | ✅ |
-| bridge_excess_nll (sampling ctl -0.52) | 1.270 | 1.50 | ✅ |
+| atlas_precision_x | 7.100 | 5.00 | ✅ |
+| bridge_excess_nll (sampling ctl -0.52) | 0.967 | 1.50 | ✅ |
 | retime_agreement | 0.866 | 0.50 | ✅ |
 | synergy_pass_rate | 0.611 | 0.60 | ✅ |
 

@@ -1,14 +1,14 @@
 """One-time (research machine): curated GENERATIVE clip library.
 
-The atlas (65k windows) is an index — tokens only, 3 MB. To PLAY a window on
-any robot we additionally need its 4 boundary-frame codes (A3's endpoint
-conditioner input): 20 KB/window, too heavy for 65k but fine for a curated set.
+The atlas (65k windows) is an index — tokens only, a few MB. To PLAY a window
+without inventing its rotation stream we keep lossless nibble-packed raw codes
+for a curated set, plus boundary codes for temporal editing.
 
 This picks 4096 windows, family-balanced round-robin, and stores
     tokens [K,32] int32, bounds [K,4,256,20] int8, clip/start/family
-so every library clip is fully regenerable from ~40 MB: endpoints from bounds,
-detokenize(tokens, endpoints, any n), decode to any embodiment. The library IS
-generative assets, not stored motion.
+The compressed metadata is small; the exact dual-stream playback store is
+roughly 600 MB for 4,096 x 60-frame windows. Equator retimes the pose stream;
+the raw rotation stream is carried/interpolated explicitly.
 """
 from __future__ import annotations
 

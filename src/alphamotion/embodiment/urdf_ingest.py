@@ -18,12 +18,21 @@ Steps:
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import numpy as np
 
 from ..paths import data_dir
 from .registry import user_dir
+
+
+def safe_body_name(value: str) -> str:
+    """Stable filesystem/database identifier for an uploaded embodiment."""
+    name = re.sub(r"[^a-zA-Z0-9_.-]+", "_", value.strip()).strip("._-")
+    if not name:
+        raise ValueError("body name contains no usable characters")
+    return name[:80].lower()
 
 
 def urdf_to_mjcf(urdf_path: str | Path, name: str) -> Path:
@@ -85,7 +94,8 @@ def semantic_labels(spec, device: str = "cuda") -> dict:
     import torch
 
     from ..engine.spatial import key_joints
-    from .semantics_map import build_name_embeddings, embed_matrix
+    from .semantics_map import (build_name_embeddings,
+                                deterministic_part_labels, embed_matrix)
     anchors = {
         "head": "the head joint of a body",
         "left arm": "the left arm joint of a body",
@@ -94,23 +104,33 @@ def semantic_labels(spec, device: str = "cuda") -> dict:
         "right leg": "the right leg joint of a body",
         "torso": "the torso joint of a body",
     }
-    labels: dict[str, str] = {}
-    method = "qwen3"
+    labels = deterministic_part_labels(spec)
+    method = "topology+name"
     try:
+        # These are names, not already-expanded prompts. build_name_embeddings
+        # applies the exact training prompt template once.
         lut = build_name_embeddings(list(spec.joint_names)
-                                    + list(anchors.values()), device=device)
+                                    + list(anchors), device=device)
         J = embed_matrix(spec.joint_names, lut)              # [J,1024]
-        A = embed_matrix(list(anchors.values()), lut)        # [6,1024]
+        A = embed_matrix(list(anchors), lut)                 # [6,1024]
         sim = J @ A.T
         for i, n in enumerate(spec.joint_names):
             labels[n] = list(anchors)[int(sim[i].argmax())]
-    except Exception:
-        method = "geometric-fallback"
+        method = "qwen3+topology"
+    except Exception:  # optional labeling dependency/cache may be unavailable
+        pass
     # geometric key joints always annotated on top (they anchor the QC metrics)
     kj, knames, tags = key_joints(spec)
     keymap = dict(zip(("root", "head", "l_wrist", "r_wrist",
                        "l_ankle", "r_ankle"), knames))
-    return {"per_joint": labels, "key_joints": keymap, "method": method}
+    # Preserve canonical anchors regardless of name-embedding ambiguity.
+    overrides = {"root": "torso", "head": "head",
+                 "l_wrist": "left arm", "r_wrist": "right arm",
+                 "l_ankle": "left leg", "r_ankle": "right leg"}
+    for tag, name in keymap.items():
+        labels[name] = overrides[tag]
+    return {"per_joint": labels, "key_joints": keymap, "method": method,
+            "coverage": len(labels) / max(spec.J, 1)}
 
 
 def ingest(urdf_path: str | Path, name: str | None = None,
@@ -119,7 +139,7 @@ def ingest(urdf_path: str | Path, name: str | None = None,
 
     from ..engine.descriptor import build_from_mjcf
     urdf_path = Path(urdf_path)
-    name = name or urdf_path.stem.lower().replace("-", "_")
+    name = safe_body_name(name or urdf_path.stem)
     report: dict = {"name": name, "source": str(urdf_path)}
 
     # 1-2: parse + descriptor

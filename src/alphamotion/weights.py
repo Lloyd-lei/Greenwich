@@ -1,6 +1,9 @@
 """Weight registry: our artifacts from HF, third-party from their origins.
 
-Our HF repo carries ONLY AlphaMotion's own weights (~300 MB). Big third-party
+Our HF repo carries ONLY AlphaMotion's own weights and curated motion assets.
+The complete core download is roughly 1 GB because native playback requires
+the lossless packed dual-stream code library in addition to model weights.
+Big third-party
 models (GENMO perception, T5) stay at their original sources and download on
 first use — cleaner licensing, small repo.
 """
@@ -21,7 +24,12 @@ ARTIFACTS = {
     "equator_a": ("equator_a", ("model.safetensors", "config.json")),
     "equator_b": ("equator_b", ("model.safetensors", "config.json")),
     "atlas": ("atlas", ("atlas.npz", "atlas_meta.json")),
-    "library": ("library", ("library.npz", "library_meta.json")),
+    # library.npz contains editor tokens and boundary codes. Native playback
+    # additionally requires the packed frame codes and root trajectories; a
+    # release missing any of these files is not a usable release.
+    "library": ("library", ("library.npz", "library_meta.json",
+                             "library_codes.npy", "library_root.npy",
+                             "library_root_meta.json")),
     "embodiments": ("embodiments", ("name_embeddings.pt",)),
 }
 

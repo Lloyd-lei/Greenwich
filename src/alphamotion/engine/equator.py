@@ -17,6 +17,21 @@ import torch.nn.functional as F
 
 from .nets.bridge import V5, BridgeA, BridgeB, tokens_of
 
+A_RELEASE = {"run": "PROD_c1_91k_dim20_tail_0810", "arch": "bridge_a",
+             "d_model": 384, "enc_layers": 6, "dec_layers": 4,
+             "n_content": 32, "time_local": True, "use_root": True}
+B_RELEASE = {"stage_a": "BRIDGE_A3_prod_0810",
+             "spatial": "PROD_c1_91k_dim20_tail_0810",
+             "arch": "bridge_b", "vocab": 15625, "ep_dim": 384}
+
+
+def _validate_config(cfg: dict, expected: dict, tower: str) -> None:
+    bad = {key: (cfg.get(key), value) for key, value in expected.items()
+           if cfg.get(key) != value}
+    if bad:
+        raise ValueError(f"{tower} checkpoint does not match the locked "
+                         f"AlphaMotion release contract: {bad}")
+
 
 class Equator:
     def __init__(self, a3: BridgeA, b3: BridgeB, device: str):
@@ -33,6 +48,7 @@ class Equator:
         a_run = Path(a_dir) if a_dir else resolve("equator_a")
         b_run = Path(b_dir) if b_dir else resolve("equator_b")
         acfg = json.load(open(a_run / "config.json"))
+        _validate_config(acfg, A_RELEASE, "Equator A")
         a3 = BridgeA(d=acfg.get("d_model", 256),
                      enc_layers=acfg.get("enc_layers", 4),
                      dec_layers=acfg.get("dec_layers", 4),
@@ -43,6 +59,8 @@ class Equator:
         a3.eval()
         for p in a3.parameters():
             p.requires_grad_(False)
+        bcfg = json.load(open(b_run / "config.json"))
+        _validate_config(bcfg, B_RELEASE, "Equator B")
         b3 = BridgeB(ep_dim=a3.d).to(device)
         b3.load_state_dict(_state(b_run))
         b3.eval()

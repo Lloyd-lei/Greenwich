@@ -1,9 +1,9 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AlphaMotion</title>
+<title>AlphaMotion</title><link rel="icon" href="data:,">
 <style>
 :root{--bg:#0a0a0c;--p:#121316;--line:#26282e;--tx:#f2f2f2;--mut:#8d93a0;--o:#ff8000;--o2:#ff9e40;--g:#38d47f;--r:#f05d4d}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--tx);font:14px Inter,system-ui,sans-serif;overflow:hidden}
+*{box-sizing:border-box}html,body{max-width:100%}body{margin:0;background:var(--bg);color:var(--tx);font:14px Inter,system-ui,sans-serif;overflow:hidden;letter-spacing:0}
 .top{height:50px;display:flex;align-items:center;gap:22px;padding:0 18px;border-bottom:1px solid var(--line)}
 .brand{font-weight:800;font-size:17px}.brand b{color:var(--o)}
 .tab{cursor:pointer;color:var(--mut);padding:5px 2px;border-bottom:2px solid transparent;font-size:13.5px}
@@ -16,10 +16,11 @@
 #vp{flex:1;background:#000;position:relative}
 #vp iframe{width:100%;height:100%;border:0;display:block}
 #vpMsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);pointer-events:none;font-size:13px;background:#0a0a0c}
-.deck{height:190px;border-top:1px solid var(--line);background:var(--p);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
-.deckrow{display:flex;align-items:center;gap:10px}
+.deck{height:174px;border-top:1px solid var(--line);background:var(--p);padding:10px 14px;display:flex;flex-direction:column;gap:8px}
+.deckrow{display:flex;align-items:center;gap:10px;min-width:0}.deckrow button{white-space:nowrap}.deckrow .dna{width:auto;min-width:0}
 .tl{flex:1;height:74px;background:#0d0e11;border:1px solid var(--line);border-radius:9px;display:flex;overflow-x:auto;padding:5px;gap:5px}
-.blk{height:100%;min-width:86px;border-radius:7px;background:linear-gradient(180deg,#ff9e40,#ff8000);color:#1a1109;padding:7px 9px;font-size:11.5px;position:relative;flex-shrink:0}
+.blk{height:100%;min-width:86px;border-radius:7px;background:linear-gradient(180deg,#ff9e40,#ff8000);color:#1a1109;padding:7px 9px;font-size:11.5px;position:relative;flex-shrink:0;cursor:pointer;border:1px solid transparent}
+.blk.sel{outline:2px solid #fff;outline-offset:1px}.blk em{display:block;font-style:normal;margin-top:7px;opacity:.72}
 .blk.gap{background:repeating-linear-gradient(45deg,#2c2417,#2c2417 7px,#1c1812 7px 14px);color:var(--o2);border:1px dashed #7a5a2c}
 .blk b{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px}
 .blk input{width:52px;background:#00000030;border:0;border-radius:4px;color:inherit;font-size:11px;padding:2px 4px;margin-top:5px}
@@ -27,20 +28,26 @@
 .blk .x:hover{opacity:1}
 .inspector{width:300px;border-left:1px solid var(--line);background:var(--p);padding:12px;overflow:auto;flex-shrink:0}
 h2{font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin:14px 0 8px}h2:first-child{margin-top:0}
-button,select,input[type=text],input[type=search]{font:inherit;color:var(--tx);background:#191b20;border:1px solid var(--line);border-radius:7px;padding:7px 10px;width:100%}
+button,select,input,textarea{font:inherit;color:var(--tx);background:#191b20;border:1px solid var(--line);border-radius:7px;padding:7px 10px;width:100%;min-width:0}
+input[type=range]{accent-color:var(--o);padding:4px 0}
+textarea{resize:vertical;min-height:58px}.field{display:flex;flex-direction:column;gap:4px;margin-top:7px}.field label{font-size:10.5px;color:var(--mut);text-transform:uppercase}.grid2{display:grid;grid-template-columns:1fr 1fr;gap:7px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+.toggle{display:flex;align-items:center;gap:8px;margin-top:9px;color:var(--mut);font-size:12px}.toggle input{width:16px;height:16px;accent-color:var(--o)}
 button{cursor:pointer}button.primary{background:var(--o);border-color:var(--o);color:#191007;font-weight:750}
 button.mini{width:auto;padding:4px 10px;font-size:12px}
 .chips{display:flex;flex-wrap:wrap;gap:5px;margin:8px 0}
 .chip{font-size:11.5px;padding:3px 9px;border-radius:12px;border:1px solid var(--line);cursor:pointer;color:var(--mut)}
 .chip.on{border-color:var(--o);color:var(--o)}
 .card{padding:8px;border:1px solid var(--line);border-radius:8px;margin-top:6px;cursor:pointer;background:#0d0e11}
-.card:hover{border-color:var(--o2)}.card b{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card:hover,.card.sel{border-color:var(--o2)}.card.sel{box-shadow:inset 3px 0 0 var(--o)}.card b{display:block;font-size:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .card small{color:var(--mut);font-size:11px}
 .badge{display:inline-block;padding:2px 9px;border-radius:11px;font-size:11.5px;font-weight:700}
 .badge.pass{background:#0d2b1c;color:var(--g)}.badge.fail{background:#33150f;color:var(--r)}
+.segctl,.constraint{border-top:1px solid var(--line);padding-top:8px;margin-top:8px}.constraint:first-child{border-top:0;margin-top:0}.constraint .head{display:flex;align-items:center;gap:8px}.constraint .head b{font-size:12px;flex:1}.iconbtn{width:30px!important;height:30px;padding:4px!important}
+.segactions{display:flex;gap:6px;margin-top:8px}.segactions button{width:auto;flex:1}
 .kv{display:flex;justify-content:space-between;border-bottom:1px solid #1c1e23;padding:5px 0;font-size:12.5px}
 .kv b{color:var(--o2);font-weight:600}
 canvas.dna{width:100%;height:26px;border-radius:5px;border:1px solid var(--line);image-rendering:pixelated}
+#atlasGraph{width:100%;height:330px;display:block;background:#090a0c;border:1px solid var(--line);border-radius:8px;margin-bottom:10px}
 .status{color:var(--mut);font-size:12px;line-height:1.45;margin-top:6px}
 a{color:var(--o2)}
 pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9px;font-size:11px;overflow:auto;color:var(--mut)}
@@ -53,6 +60,24 @@ pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9p
 #atlas .panel,#bodies .panel{max-height:calc(100vh - 84px)}
 #atlas.on{display:grid;grid-template-columns:330px 1fr}
 #bodies.on{display:grid;grid-template-columns:310px 1fr}
+#bodyPreview{height:52vh;min-height:360px;background:#050506;border:1px solid var(--line);border-radius:8px;position:relative;overflow:hidden;margin:9px 0}
+#bodyPreview iframe{width:100%;height:100%;border:0;display:block}
+#bodyVpMsg{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:var(--mut);pointer-events:none}
+.semgrid{display:grid;grid-template-columns:minmax(130px,1fr) minmax(90px,.65fr);max-height:220px;overflow:auto;border:1px solid var(--line);border-radius:8px;margin-top:8px}
+.semgrid div{padding:5px 8px;border-bottom:1px solid #1c1e23;font-size:11.5px}.semgrid div:nth-child(2n){color:var(--o2)}
+.legend{display:flex;gap:8px;flex-wrap:wrap;margin:7px 0}.legend span{font-size:10.5px;color:var(--mut)}.legend i{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:4px}
+@media(max-width:900px){
+ body{overflow:auto}.top{position:sticky;top:0;z-index:10;background:var(--bg);gap:14px;padding:0 12px}.brand{font-size:15px}.tab{font-size:12px}#health{max-width:90px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+ .view{height:auto;min-height:calc(100vh - 50px)}#studio.on{display:grid;grid-template-columns:1fr;grid-template-areas:"stage" "inspector" "library"}
+ .stage{grid-area:stage;height:72vh;min-height:560px}.bin{grid-area:library;width:100%;border:0;border-top:1px solid var(--line);max-height:none}.inspector{grid-area:inspector;width:100%;border:0;border-top:1px solid var(--line);max-height:none}
+ #vp{min-height:42vh}.deck{height:190px;padding:8px}.tl{height:88px}.blk{min-width:105px}
+ #atlas.on,#bodies.on{display:grid;grid-template-columns:1fr;padding:10px}.panel{max-height:none!important}.grid3{grid-template-columns:1fr 1fr 1fr}
+}
+@media(max-width:520px){
+ .top{gap:10px}.brand{font-size:14px}.tab{font-size:11px}
+ #health{width:8px;height:8px;min-width:8px;border-radius:50%;background:var(--g);font-size:0;margin-left:auto}
+ .deckrow{gap:6px}.deckrow button{padding-left:8px;padding-right:8px}
+}
 </style></head><body>
 <header class="top">
   <div class="brand">Alpha<b>Motion</b></div>
@@ -69,6 +94,12 @@ pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9p
     <div id="famChips" class="chips"></div>
     <div id="libList"></div>
     <button id="libMore" class="mini" style="margin-top:8px">more</button>
+    <h2>Optional perception</h2>
+    <textarea id="promptText" placeholder="text-to-motion adapter"></textarea>
+    <div class="grid2" style="margin-top:6px"><input id="promptN" type="number" min="15" max="1800" value="120"><button id="addPrompt" class="mini">add prompt</button></div>
+    <input id="videoFile" type="file" accept="video/mp4,video/quicktime,video/webm,.mkv,.avi" style="display:none">
+    <button id="addVideo" class="mini" style="margin-top:6px">+ video motion</button>
+    <div id="perceptionStatus" class="status"></div>
   </aside>
   <section class="stage">
     <div id="vp">
@@ -88,9 +119,17 @@ pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9p
     </div>
   </section>
   <aside class="inspector">
+    <h2>Temporal segment</h2>
+    <div id="segmentEditor" class="status">select a block in the timeline</div>
     <h2>Compile</h2>
     <select id="body"></select>
     <input id="title" type="text" placeholder="title (optional)" style="margin-top:7px">
+    <div class="grid2"><div class="field"><label>FPS</label><input id="fps" type="number" min="1" max="120" value="30"></div><div class="field"><label>Total</label><div id="compileTotal" class="kv" style="height:34px"><b>0f</b></div></div></div>
+    <label class="toggle"><input id="renderMp4" type="checkbox" checked> export H.264 MP4</label>
+    <h2>SE(3) constraints</h2>
+    <div class="status">Canonical axes: x lateral, y up, z forward. Pelvis position edits the world trajectory.</div>
+    <div id="se3List"></div>
+    <button id="addSe3" class="mini" style="margin-top:8px">+ constraint</button>
     <button id="compile" class="primary" style="margin-top:10px">Generate</button>
     <div id="jobLog" class="status"></div>
     <h2>Result</h2>
@@ -106,12 +145,15 @@ pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9p
     <div id="atlasMotions"></div>
     <h2>Slot</h2>
     <input id="slot" type="range" min="0" max="31" value="16" style="width:100%">
-    <div class="status">slot <b id="slotV">16</b>/32 — every DNA band is a doorway</div>
+    <div class="status">slot <b id="slotV">16</b>/32 — search anchor in Atlas Memory</div>
     <canvas id="dna2" class="dna" width="640" height="26" style="margin-top:6px"></canvas>
   </section>
   <section class="panel">
+    <h2>Atlas Memory</h2>
+    <canvas id="atlasGraph" width="1100" height="520"></canvas>
     <h2>Portals</h2>
     <div id="portals" class="status">pick a motion on the left</div>
+    <div id="atlasJob" class="status"></div>
     <h2>Random walk</h2>
     <button id="walkBtn" class="mini">wander</button>
     <div id="walkOut" class="status"></div>
@@ -123,54 +165,71 @@ pre{background:#0d0e11;border:1px solid var(--line);border-radius:8px;padding:9p
     <h2>Embodiments</h2>
     <div id="bodyList"></div>
     <h2>Bring your own robot</h2>
-    <div id="drop" class="drop">drop a URDF here<br><small>parse → limits → labels → refiner, automatic</small></div>
-    <input id="urdfFile" type="file" accept=".urdf,.xml" style="display:none">
+    <div id="drop" class="drop">drop a URDF or robot ZIP<br><small>meshes included · parse → limits → labels → refiner</small></div>
+    <input id="urdfFile" type="file" accept=".urdf,.zip" style="display:none">
   </section>
   <section class="panel">
     <h2 id="bodyName">select a body</h2>
     <div id="bodyDetail" class="status"></div>
+    <div id="bodyPreview"><iframe id="bodyFrame" allow="fullscreen"></iframe><div id="bodyVpMsg">select an embodiment to inspect</div></div>
+    <div class="legend"><span><i style="background:#ff8000"></i>torso</span><span><i style="background:#3ea5ff"></i>left arm</span><span><i style="background:#3bd67f"></i>right arm</span><span><i style="background:#b974ff"></i>left leg</span><span><i style="background:#ffc842"></i>right leg</span></div>
+    <div id="semantics" class="semgrid" style="display:none"></div>
     <pre id="bodyJson" style="display:none"></pre>
   </section>
 </div>
 
 <script>
-const $=s=>document.querySelector(s);const api=async(p,o)=>{const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()};
+const $=s=>document.querySelector(s);
+const api=async(p,o)=>{const r=await fetch(p,o);if(!r.ok)throw new Error(await r.text());return r.json()};
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.toggle('on',x===t));document.querySelectorAll('.view').forEach(w=>w.classList.toggle('on',w.id===t.dataset.v))});
-let fam='',off=0,segs=[],atlasSel=null;
+let fam='',off=0,segs=[],selected=-1,se3=[],atlasSel=null,atlasTokens=null,bodyDetail=null,caps={},atlasWindows=1;
 const tokColor=t=>{const h=(t*2654435761>>>0)%360;return `hsl(${h} 75% 55%)`};
-function drawDNA(cv,toks){const c=cv.getContext('2d');c.clearRect(0,0,cv.width,cv.height);if(!toks)return;const w=cv.width/32;toks.forEach((t,i)=>{c.fillStyle=tokColor(t);c.fillRect(i*w,0,w-1,cv.height)})}
+function drawDNA(cv,toks,active=-1){const c=cv.getContext('2d');c.clearRect(0,0,cv.width,cv.height);if(!toks)return;const w=cv.width/32;toks.forEach((t,i)=>{c.fillStyle=tokColor(t);c.fillRect(i*w,0,w-1,cv.height)});if(active>=0){c.strokeStyle='#fff';c.lineWidth=2;c.strokeRect(active*w+.5,.5,Math.max(2,w-1),cv.height-1)}}
+function totalFrames(){return segs.reduce((a,s)=>a+(Number(s.n)||0),0)}
+function insertSegment(segment){const at=selected>=0?selected+1:segs.length;segs.splice(at,0,segment);selected=at;renderTl()}
+function totalLabel(){const n=totalFrames(),fps=Number($('#fps').value)||30;return n?`${n}f · ${(n/fps).toFixed(1)}s`:''}
+function updateTotals(){$('#tlTotal').textContent=totalLabel();$('#compileTotal').innerHTML=`<b>${totalLabel()||'0f'}</b>`}
+function pinsText(p){return Object.entries(p||{}).map(([k,v])=>`${k}:${v}`).join(', ')}
+function parsePins(text){if(!text.trim())return null;const out={};text.split(',').forEach(pair=>{const [a,b]=pair.trim().split(':').map(Number);if(!Number.isInteger(a)||a<0||a>31||!Number.isInteger(b)||b<0||b>15624)throw new Error('pins use slot:token, slot 0–31 and token 0–15624');out[a]=b});return out}
 async function loadFams(){const d=await api('/api/families');$('#famChips').innerHTML='';['',...d.families].forEach(f=>{const c=document.createElement('span');c.className='chip'+(f===fam?' on':'');c.textContent=f||'all';c.onclick=()=>{fam=f;off=0;$('#libList').innerHTML='';loadLib();document.querySelectorAll('#famChips .chip').forEach(x=>x.classList.toggle('on',x.textContent===(f||'all')))};$('#famChips').append(c)})}
-async function loadLib(){const d=await api(`/api/library?q=${encodeURIComponent($('#libQ').value)}&family=${fam}&offset=${off}&limit=14`);$('#libTotal').textContent=`(${d.total})`;d.items.forEach(it=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${it.name}</b><small>${it.family}</small>`;e.onclick=()=>{segs.push({kind:'library',library_id:it.id,n:60,name:it.name.slice(0,24)});renderTl()};$('#libList').append(e)});off+=d.items.length}
-function renderTl(){const T=$('#tl');T.innerHTML=segs.length?'':'<div style="color:var(--mut);font-size:12px;align-self:center;padding:0 8px">click library clips to build a timeline</div>';segs.forEach((s,i)=>{const b=document.createElement('div');b.className='blk'+(s.kind==='gap'?' gap':'');b.style.minWidth=Math.max(70,s.n*1.4)+'px';b.innerHTML=`<b>${s.kind==='gap'?'Equator bridge':s.name}</b>n=<input type="number" min="15" max="300" value="${s.n}">`;b.querySelector('input').oninput=ev=>{s.n=+ev.target.value||60;$('#tlTotal').textContent=tlTotal()};const x=document.createElement('span');x.className='x';x.textContent='✕';x.onclick=()=>{segs.splice(i,1);renderTl()};b.append(x);T.append(b)});$('#tlTotal').textContent=tlTotal()}
-function tlTotal(){const n=segs.reduce((a,s)=>a+s.n,0);return n?`${n}f · ${(n/30).toFixed(1)}s`:''}
-$('#addGap').onclick=()=>{if(segs.length)segs.push({kind:'gap',n:45});renderTl()};
-$('#clearTl').onclick=()=>{segs=[];renderTl()};
-$('#libQ').oninput=()=>{clearTimeout(window.qq);window.qq=setTimeout(()=>{off=0;$('#libList').innerHTML='';loadLib()},200)};
-$('#libMore').onclick=loadLib;
-async function loadBodies(){const d=await api('/api/bodies');$('#body').innerHTML=d.bodies.map(b=>`<option>${b.name}</option>`).join('');$('#body').value='unitree_h1';const L=$('#bodyList');L.innerHTML='';d.bodies.forEach(b=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${b.name}</b><small>${b.source}</small>`;e.onclick=async()=>{const det=await api('/api/bodies/'+b.name);$('#bodyName').textContent=b.name;$('#bodyDetail').innerHTML=`<div class=kv><span>joints</span><b>${det.joints}</b></div><div class=kv><span>height</span><b>${det.height_cm} cm</b></div><div class=kv><span>source</span><b>${det.source}</b></div>`;$('#bodyJson').style.display='block';$('#bodyJson').textContent=JSON.stringify({joint_names:det.joint_names,sem_labels:det.sem_labels||null,limits:det.limit_report||null},null,1)};L.append(e)})}
-$('#compile').onclick=async()=>{if(!segs.length){$('#jobLog').textContent='timeline is empty';return}
- const payload={segments:segs.map(({name,...s})=>s),target_body:$('#body').value,title:$('#title').value,render:false};
- $('#compile').disabled=true;
- try{const d=await api('/api/jobs/timeline',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});$('#jobLog').textContent='job '+d.job_id+' running…';poll(d.job_id)}catch(e){$('#jobLog').textContent='failed: '+e.message;$('#compile').disabled=false}};
-async function poll(id){const t=setInterval(async()=>{const j=await api('/api/jobs/'+id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);$('#compile').disabled=false;
- if(j.status==='failed'){$('#jobLog').textContent='FAILED: '+j.error;return}
- const r=j.result;drawDNA($('#dna'),r.tokens);
- $('#jobLog').textContent='done · motion #'+r.motion_id;
- $('#vpMsg').style.display='none';
- const g=r.gate;$('#result').innerHTML=`<div class=kv><span>frames</span><b>${r.frames}</b></div><div class=kv><span>family</span><b>${r.family}</b></div><div class=kv><span>synergy</span><span class="badge ${g.passed?'pass':'fail'}">${g.passed?'PASS':'FLAG'} ${g.ratio}</span></div><div class=kv><span>trace</span><a href="/api/results/${r.trace}" download>download</a></div>${r.viewer_note?`<div class=status>${r.viewer_note}</div>`:''}`;
- loadRecent()},1200)}
-async function loadRecent(){const d=await api('/api/motions?limit=8');const R=$('#recent');R.innerHTML='';const A=$('#atlasMotions');A.innerHTML='';d.motions.forEach(m=>{const mk=()=>{const e=document.createElement('div');e.className='card';e.innerHTML=`<b>${m.title}</b><small>${m.family} · ${m.frames}f · gate ${typeof m.gate_ratio==='number'?m.gate_ratio.toFixed(2):m.gate_ratio}</small>`;return e};R.append(mk());const a=mk();a.onclick=async()=>{atlasSel=m.id;const w=await api('/api/atlas/portals/'+m.id+'?slot='+$('#slot').value);showPortals(w.portals)};A.append(a)})}
-function showPortals(ps){const P=$('#portals');P.innerHTML=ps.length?'':'no portals through this token';ps.forEach(p=>{const e=document.createElement('div');e.className='portal';e.innerHTML=`<span class=fam>${p.family}</span><span style="flex:1">${p.clip.slice(0,44)}</span><b style="color:var(--o2)">${p.score}</b>`;P.append(e)})}
-$('#slot').oninput=async()=>{$('#slotV').textContent=$('#slot').value;if(atlasSel){const w=await api('/api/atlas/portals/'+atlasSel+'?slot='+$('#slot').value);showPortals(w.portals)}};
-$('#walkBtn').onclick=async()=>{const d=await api('/api/atlas/walk/'+Math.floor(Math.random()*65536)+'?steps=6');$('#walkOut').innerHTML=d.path.map(p=>`<div class=kv><span>${p.clip.slice(0,38)}</span><b>${p.family}</b></div>`).join('')};
-const drop=$('#drop');drop.onclick=()=>$('#urdfFile').click();
-drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};drop.ondragleave=()=>drop.classList.remove('hover');
-drop.ondrop=async e=>{e.preventDefault();drop.classList.remove('hover');upload(e.dataTransfer.files[0])};
-$('#urdfFile').onchange=e=>upload(e.target.files[0]);
-async function upload(f){if(!f)return;const fd=new FormData();fd.append('file',f);drop.textContent='ingesting '+f.name+'…';const d=await api('/api/bodies/ingest',{method:'POST',body:fd});const t=setInterval(async()=>{const j=await api('/api/jobs/'+d.job_id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);drop.textContent=j.status==='done'?('registered: '+j.result.name+' ('+j.result.joints+' joints)'):('failed: '+j.error.slice(0,120));loadBodies()},1500)}
-(async()=>{try{const h=await api('/api/health');$('#health').textContent=`online · ${h.warm.device} · atlas ${h.warm.atlas_windows.toLocaleString()}`;
- const wsu=(location.protocol==='https:'?'wss':'ws')+'://'+location.host+'/viser-ws';
- $('#viserFrame').src='/viewer/?websocket='+encodeURIComponent(wsu);
- setTimeout(()=>$('#vpMsg').style.display='none',2000);
- renderTl();await loadFams();await loadLib();await loadBodies();await loadRecent()}catch(e){$('#health').textContent='service offline';$('#health').style.color='var(--r)'}})();
+async function loadLib(){const d=await api(`/api/library?q=${encodeURIComponent($('#libQ').value)}&family=${encodeURIComponent(fam)}&offset=${off}&limit=14`);$('#libTotal').textContent=`(${d.total})`;d.items.forEach(it=>{const e=document.createElement('div');e.className='card';const b=document.createElement('b'),s=document.createElement('small');b.textContent=it.name;const meta=[it.family];if(Number.isFinite(it.vertical_range_cm))meta.push(`vertical ${it.vertical_range_cm} cm`);if(Number.isFinite(it.path_m))meta.push(`path ${it.path_m} m`);s.textContent=meta.join(' · ');e.append(b,s);e.onclick=()=>insertSegment({kind:'library',library_id:it.id,n:60,name:it.name,family:it.family,pins:null});$('#libList').append(e)});off+=d.items.length}
+function renderTl(){const T=$('#tl');T.innerHTML='';if(!segs.length)T.innerHTML='<div style="color:var(--mut);font-size:12px;align-self:center;padding:0 8px">Choose clips, then insert bridges between them.</div>';segs.forEach((s,i)=>{const b=document.createElement('div');b.className='blk'+(s.kind==='gap'?' gap':'')+(i===selected?' sel':'');b.style.minWidth=Math.max(90,Math.min(260,s.n*1.15))+'px';b.innerHTML=`<b>${esc(s.kind==='gap'?'Bridge':s.name||s.text||s.kind)}</b><em>${s.n} frames${s.pins?' · pinned':''}</em>`;b.onclick=()=>{selected=i;renderTl()};const x=document.createElement('span');x.className='x';x.textContent='×';x.title='Remove segment';x.onclick=e=>{e.stopPropagation();segs.splice(i,1);selected=Math.min(selected,segs.length-1);renderTl()};b.append(x);T.append(b)});updateTotals();renderSegmentEditor()}
+function renderSegmentEditor(){const E=$('#segmentEditor');if(selected<0||!segs[selected]){E.className='status';E.textContent='select a block in the timeline';return}const s=segs[selected];E.className='segctl';E.innerHTML=`<div class="kv"><span>type</span><b>${esc(s.kind)}</b></div><div class="field"><label>optional time budget N · <b id="segNV">${s.n}</b> frames</label><input id="segRange" type="range" min="1" max="${Math.max(300,s.n)}" value="${s.n}"><input id="segN" type="number" min="1" max="1800" value="${s.n}"></div><div class="segactions"><button id="segLeft" class="mini" title="Move earlier">← earlier</button><button id="segRight" class="mini" title="Move later">later →</button></div>${s.kind==='gap'?`<div class="grid2"><div class="field"><label>seed</label><input id="segSeed" type="number" value="${s.seed||0}"></div><div class="field"><label>temperature</label><input id="segTemp" type="number" min="0.05" max="3" step="0.05" value="${s.temperature||0.9}"></div></div>`:''}${['gap','library'].includes(s.kind)?`<div class="field"><label>token pins · slot:token</label><input id="segPins" type="text" placeholder="4:120, 17:4021" value="${esc(pinsText(s.pins))}"><div id="pinError" class="status"></div></div>`:''}`;
+ const setN=v=>{s.n=Math.max(1,Math.min(1800,Math.round(Number(v)||1)));$('#segN').value=s.n;$('#segRange').value=s.n;$('#segNV').textContent=s.n;const block=$$('#tl .blk')[selected];if(block){block.style.minWidth=Math.max(90,Math.min(260,s.n*1.15))+'px';block.querySelector('em').textContent=`${s.n} frames${s.pins?' · pinned':''}`}updateTotals()};
+ $('#segRange').oninput=e=>setN(e.target.value);$('#segN').oninput=e=>setN(e.target.value);
+ $('#segLeft').onclick=()=>{if(selected<=0)return;[segs[selected-1],segs[selected]]=[segs[selected],segs[selected-1]];selected--;renderTl()};
+ $('#segRight').onclick=()=>{if(selected<0||selected>=segs.length-1)return;[segs[selected+1],segs[selected]]=[segs[selected],segs[selected+1]];selected++;renderTl()};
+ if($('#segSeed'))$('#segSeed').oninput=e=>s.seed=Number(e.target.value)||0;
+ if($('#segTemp'))$('#segTemp').oninput=e=>s.temperature=Number(e.target.value)||0.9;
+ if($('#segPins'))$('#segPins').onchange=e=>{try{s.pins=parsePins(e.target.value);$('#pinError').textContent='';renderTl()}catch(err){$('#pinError').textContent=err.message;$('#pinError').style.color='var(--r)'}};
+}
+const $$=s=>[...document.querySelectorAll(s)];
+$('#addGap').onclick=()=>{let at=(selected>=0?selected+1:-1);if(at<=0||at>=segs.length||segs[at-1].kind==='gap'||segs[at].kind==='gap'){at=-1;for(let i=1;i<segs.length;i++)if(segs[i-1].kind!=='gap'&&segs[i].kind!=='gap'){at=i;break}}if(at<0){$('#jobLog').textContent='Add two motion clips, then select the left clip to insert a bridge.';return}segs.splice(at,0,{kind:'gap',n:45,seed:0,temperature:0.9,pins:null});selected=at;renderTl()};
+$('#clearTl').onclick=()=>{segs=[];selected=-1;se3=[];renderTl();renderSe3()};
+$('#fps').oninput=updateTotals;
+$('#libQ').oninput=()=>{clearTimeout(window.qq);window.qq=setTimeout(()=>{off=0;$('#libList').innerHTML='';loadLib()},200)};$('#libMore').onclick=loadLib;
+$('#addPrompt').onclick=()=>{const text=$('#promptText').value.trim();if(!caps.perception){$('#perceptionStatus').textContent='Perception adapter is not configured on this host.';return}if(!text)return;insertSegment({kind:'prompt',text,n:Number($('#promptN').value)||120,name:text})};
+$('#addVideo').onclick=()=>{if(!caps.perception){$('#perceptionStatus').textContent='Video adapter is not configured on this host.';return}$('#videoFile').click()};
+$('#videoFile').onchange=async e=>{const f=e.target.files[0];if(!f)return;$('#perceptionStatus').textContent='uploading '+f.name+'…';try{const fd=new FormData();fd.append('file',f);const d=await api('/api/assets/video',{method:'POST',body:fd});insertSegment({kind:'video',video_asset:d.asset,n:Number($('#promptN').value)||120,name:d.name});$('#perceptionStatus').textContent=`video ready · ${(d.bytes/1048576).toFixed(1)} MiB`}catch(err){$('#perceptionStatus').textContent='video rejected: '+err.message.slice(0,120)}finally{e.target.value=''}};
+function jointKey(name){const n=String(name||'').toLowerCase();const side=/(^|[_ ])left|^l[_ ]/.test(n)?'left':/(^|[_ ])right|^r[_ ]/.test(n)?'right':'';const part=['pelvis','root','hip','knee','ankle','foot','shoulder','elbow','wrist','hand','head','neck'].find(x=>n.includes(x))||n.replace(/[^a-z0-9]/g,'');return side+':'+part}
+async function selectBody(name){const previous=bodyDetail;const next=await api('/api/bodies/'+name);if(previous)se3.forEach(c=>{const key=jointKey(previous.joint_names[c.joint]);const mapped=next.joint_names.findIndex(n=>jointKey(n)===key);c.joint=mapped>=0?mapped:Math.min(c.joint,next.joints-1)});bodyDetail=next;$('#renderMp4').disabled=!bodyDetail.renderable;if(!bodyDetail.renderable)$('#renderMp4').checked=false;renderSe3()}
+async function showBody(name){const det=await api('/api/bodies/'+name);$('#bodyName').textContent=name;const sem=det.sem_labels||{},coverage=Math.round(100*(sem.coverage??0));$('#bodyDetail').innerHTML=`<div class=kv><span>joints</span><b>${det.joints}</b></div><div class=kv><span>height</span><b>${det.height_cm} cm</b></div><div class=kv><span>source</span><b>${esc(det.source)}</b></div><div class=kv><span>mesh</span><b>${det.renderable?'ready':'descriptor only'}</b></div><div class=kv><span>semantic coverage</span><b>${coverage}% · ${esc(sem.method||'unknown')}</b></div>`;const G=$('#semantics'),pairs=Object.entries(sem.per_joint||{});G.style.display=pairs.length?'grid':'none';G.innerHTML=pairs.map(([joint,part])=>`<div>${esc(joint)}</div><div>${esc(part)}</div>`).join('');$('#bodyJson').style.display='block';$('#bodyJson').textContent=JSON.stringify({joint_names:det.joint_names,sem_labels:sem,limits:det.limit_report||null},null,1);$('#bodyVpMsg').style.display='flex';$('#bodyVpMsg').textContent='loading semantic mesh…';try{await api('/api/bodies/'+encodeURIComponent(name)+'/preview',{method:'POST'});setTimeout(()=>$('#bodyVpMsg').style.display='none',250)}catch(err){$('#bodyVpMsg').textContent='preview failed: '+err.message.slice(0,100)}}
+async function loadBodies(){const d=await api('/api/bodies');const S=$('#body');S.innerHTML='';d.bodies.forEach(b=>{const o=document.createElement('option');o.value=b.name;o.textContent=b.name+(b.renderable?'':' · no mesh');S.append(o)});S.value=d.bodies.some(x=>x.name==='unitree_h1')?'unitree_h1':d.bodies[0]?.name;S.onchange=()=>selectBody(S.value);const L=$('#bodyList');L.innerHTML='';d.bodies.forEach(b=>{const e=document.createElement('div');e.className='card';const n=document.createElement('b'),m=document.createElement('small');n.textContent=b.name;m.textContent=b.source+(b.renderable?' · mesh + semantics':' · semantic skeleton');e.append(n,m);e.onclick=()=>showBody(b.name);L.append(e)});if(S.value)await selectBody(S.value)}
+function num(v){return Number.isFinite(Number(v))?Number(v):0}
+function renderSe3(){const L=$('#se3List');L.innerHTML='';if(!se3.length){L.innerHTML='<div class="status">No task-space edits.</div>';return}se3.forEach((c,i)=>{const e=document.createElement('div');e.className='constraint';const opts=(bodyDetail?.joint_names||[]).map((n,j)=>`<option value="${j}"${j===c.joint?' selected':''}>${j} · ${esc(n)}</option>`).join('');e.innerHTML=`<div class="head"><b>Constraint ${i+1}</b><button class="iconbtn" title="Remove">×</button></div><div class="field"><label>joint</label><select data-k="joint">${opts}</select></div><div class="grid2"><div class="field"><label>start frame</label><input data-k="frame_start" type="number" min="0" value="${c.frame_start}"></div><div class="field"><label>end frame</label><input data-k="frame_end" type="number" min="1" value="${c.frame_end}"></div></div><div class="field"><label>position Δ · meters</label><div class="grid3">${c.delta_m.map((v,a)=>`<input data-k="delta_m" data-a="${a}" type="number" step="0.01" value="${v}">`).join('')}</div></div><div class="field"><label>rotation Δ · degrees XYZ</label><div class="grid3">${c.delta_rot_deg.map((v,a)=>`<input data-k="delta_rot_deg" data-a="${a}" type="number" step="1" value="${v}">`).join('')}</div></div>`;e.querySelector('button').onclick=()=>{se3.splice(i,1);renderSe3()};e.querySelectorAll('[data-k]').forEach(x=>x.oninput=()=>{const k=x.dataset.k;if(k==='joint')c[k]=Number(x.value);else if(k==='delta_m'||k==='delta_rot_deg')c[k][Number(x.dataset.a)]=num(x.value);else c[k]=Math.max(0,Math.round(num(x.value))) });L.append(e)})}
+$('#addSe3').onclick=()=>{const names=bodyDetail?.joint_names||[];let j=names.findIndex(n=>/right.*(wrist|hand)|r_wrist/i.test(n));if(j<0)j=names.findIndex(n=>/right.*elbow|r_elbow/i.test(n));if(j<0)j=Math.max(0,names.length-1);se3.push({joint:j,frame_start:0,frame_end:Math.max(1,totalFrames()),delta_m:[0,0,0],delta_rot_deg:[0,0,0]});renderSe3()};
+function validateTimeline(){if(!segs.length)throw new Error('timeline is empty');if(segs[0].kind==='gap'||segs.at(-1).kind==='gap')throw new Error('a bridge needs clips on both sides');for(let i=1;i<segs.length;i++)if(segs[i].kind==='gap'&&segs[i-1].kind==='gap')throw new Error('consecutive bridges are invalid');const n=totalFrames();se3.forEach(c=>{if(c.frame_start>=c.frame_end||c.frame_end>n)throw new Error(`SE(3) frame range must lie inside 0–${n}`)})}
+$('#compile').onclick=async()=>{try{validateTimeline()}catch(e){$('#jobLog').textContent=e.message;return}const payload={segments:segs.map(({name,family,...s})=>s),target_body:$('#body').value,title:$('#title').value,se3,render:$('#renderMp4').checked,fps:Number($('#fps').value)||30};$('#compile').disabled=true;$('#result').textContent='working…';try{const d=await api('/api/jobs/timeline',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify(payload)});$('#jobLog').textContent='job '+d.job_id+' · temporal compile';poll(d.job_id)}catch(e){$('#jobLog').textContent='failed: '+e.message;$('#compile').disabled=false}};
+async function poll(id){const t=setInterval(async()=>{try{const j=await api('/api/jobs/'+id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);$('#compile').disabled=false;if(j.status==='failed'){$('#jobLog').textContent='FAILED: '+j.error;$('#result').textContent='generation failed';return}showResult(j.result);loadRecent()}catch(e){clearInterval(t);$('#compile').disabled=false;$('#jobLog').textContent='poll failed: '+e.message}},900)}
+function showResult(r){drawDNA($('#dna'),r.tokens);$('#jobLog').textContent=(r.release_passed?'done':'QC FLAG')+' · motion #'+r.motion_id;const g=r.gate,c=r.qc?.continuity||{},l=r.qc?.limb_synergy||{},lp=l.passed??false;const links=[`<a href="/api/results/${encodeURIComponent(r.trace)}" download>trace</a>`];if(r.mp4)links.push(`<a href="/api/results/${encodeURIComponent(r.mp4)}" download>MP4</a>`);const serr=(r.se3||[]).map(x=>`<div class=kv><span>${esc(x.joint_name||('joint '+x.joint))}</span><b>${x.position_error_cm} cm · ${x.rotation_error_deg}°</b></div>`).join('');$('#result').innerHTML=`<div class=kv><span>release</span><span class="badge ${r.release_passed?'pass':'fail'}">${r.release_passed?'APPROVED':'AUDIT ONLY'}</span></div><div class=kv><span>frames</span><b>${r.frames}</b></div><div class=kv><span>family</span><b>${esc(r.family)}</b></div><div class=kv><span>continuity</span><span class="badge ${c.passed?'pass':'fail'}">${c.passed?'PASS':'FLAG'}</span></div><div class=kv><span>global likelihood</span><span class="badge ${g.passed?'pass':'fail'}">${g.passed?'PASS':'FLAG'} ${g.ratio}</span></div><div class=kv><span>four-limb synergy</span><span class="badge ${lp?'pass':'fail'}">${lp?'PASS':'FLAG'} ${l.retained_ratio??'n/a'}</span></div><div class=kv><span>assets</span><b>${links.join(' · ')}</b></div>${serr}${r.viewer_note?`<div class=status>${esc(r.viewer_note)}</div>`:''}`}
+async function loadRecent(){const d=await api('/api/motions?limit=50');const R=$('#recent');R.innerHTML='';const A=$('#atlasMotions');A.innerHTML='';d.motions.forEach((m,ix)=>{const mk=()=>{const e=document.createElement('div');e.className='card';const b=document.createElement('b'),s=document.createElement('small');b.textContent=m.title;s.textContent=`${m.family} · ${m.frames}f · ${m.release_passed?'approved':'audit only'} · gate ${typeof m.gate_ratio==='number'?m.gate_ratio.toFixed(2):m.gate_ratio}`;e.append(b,s);return e};if(ix<8)R.append(mk());if(!m.release_passed)return;const a=mk();a.onclick=async()=>{atlasSel=m.id;atlasTokens=m.tokens;$$('#atlasMotions .card').forEach(x=>x.classList.toggle('sel',x===a));drawDNA($('#dna2'),atlasTokens,Number($('#slot').value));const w=await api('/api/atlas/portals/'+m.id+'?slot='+$('#slot').value);showPortals(w.portals)};A.append(a)})}
+function drawAtlasGraph(ps){const cv=$('#atlasGraph'),c=cv.getContext('2d'),w=cv.width,h=cv.height;c.clearRect(0,0,w,h);c.fillStyle='#090a0c';c.fillRect(0,0,w,h);c.strokeStyle='#26282e';c.lineWidth=1;for(let x=0;x<w;x+=55){c.beginPath();c.moveTo(x,0);c.lineTo(x,h);c.stroke()}for(let y=0;y<h;y+=52){c.beginPath();c.moveTo(0,y);c.lineTo(w,y);c.stroke()}const sx=175,sy=h/2;c.fillStyle='#ff8000';c.beginPath();c.arc(sx,sy,38,0,Math.PI*2);c.fill();c.fillStyle='#15100a';c.font='700 17px Inter, sans-serif';c.textAlign='center';c.fillText('CURRENT',sx,sy-3);c.font='13px Inter, sans-serif';c.fillText('slot '+$('#slot').value,sx,sy+17);(ps||[]).slice(0,8).forEach((p,i)=>{const col=i<4?0:1,row=i%4,x=520+col*330,y=75+row*122,score=Math.max(0,Math.min(1,Number(p.score)||0));c.strokeStyle=`rgba(255,128,0,${.22+.72*score})`;c.lineWidth=1.5+4*score;c.beginPath();c.moveTo(sx+38,sy);c.bezierCurveTo(330,sy,360,y,x-28,y);c.stroke();c.fillStyle=Number.isInteger(p.library_id)?'#f2f2f2':'#676b74';c.beginPath();c.arc(x,y,25,0,Math.PI*2);c.fill();c.fillStyle='#ff9e40';c.font='700 12px Inter, sans-serif';c.textAlign='left';c.fillText(String(p.family||'other').toUpperCase(),x+40,y-5);c.fillStyle='#b6bac2';c.font='12px Inter, sans-serif';c.fillText(String(p.clip||'').slice(0,31),x+40,y+15)});c.fillStyle='#8d93a0';c.textAlign='left';c.font='12px Inter, sans-serif';c.fillText(ps?.length?'shared rainbow-code portals':'Select a generated motion to query its graph neighborhood',24,30)}
+function showPortals(ps){drawAtlasGraph(ps);const P=$('#portals');P.innerHTML=ps.length?'':'no portals through this token';ps.forEach(p=>{const e=document.createElement('div');e.className='portal';const f=document.createElement('span'),n=document.createElement('span'),b=document.createElement('b');f.className='fam';f.textContent=p.family;n.style.flex='1';n.textContent=p.clip.slice(0,44);b.style.color='var(--o2)';b.textContent=p.score;e.append(f,n,b);if(Number.isInteger(p.library_id)){const go=document.createElement('button');go.className='mini';go.textContent='bridge';go.title='Generate a playable bridge into this library clip';go.onclick=()=>runPortal(p);e.append(go)}else{const ix=document.createElement('small');ix.textContent='index only';e.append(ix)}P.append(e)})}
+async function runPortal(p){if(!atlasSel)return;const A=$('#atlasJob');A.textContent='building portal bridge…';try{const d=await api('/api/jobs/jump',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({motion_id:atlasSel,at_slot:Number($('#slot').value),dest_library_id:p.library_id,bridge_n:30,target_body:$('#body').value,render:$('#renderMp4').checked})});const timer=setInterval(async()=>{try{const j=await api('/api/jobs/'+d.job_id);if(j.status==='queued'||j.status==='running')return;clearInterval(timer);if(j.status==='failed'){A.textContent='portal failed: '+j.error;return}showResult(j.result);const safe=j.result.release_passed;const link=j.result.mp4?` · <a href="/api/results/${encodeURIComponent(j.result.mp4)}" download>MP4</a>`:'';A.innerHTML=`${safe?'done':'QC FLAG'} · motion #${j.result.motion_id}${link}`;loadRecent()}catch(e){clearInterval(timer);A.textContent='portal poll failed: '+e.message}},900)}catch(e){A.textContent='portal failed: '+e.message}}
+$('#slot').oninput=async()=>{$('#slotV').textContent=$('#slot').value;if(atlasSel){drawDNA($('#dna2'),atlasTokens,Number($('#slot').value));const w=await api('/api/atlas/portals/'+atlasSel+'?slot='+$('#slot').value);showPortals(w.portals)}};
+$('#walkBtn').onclick=async()=>{const d=await api('/api/atlas/walk/'+Math.floor(Math.random()*atlasWindows)+'?steps=6');$('#walkOut').innerHTML=d.path.map(p=>`<div class=kv><span>${esc(p.clip.slice(0,38))}</span><b>${esc(p.family)}</b></div>`).join('')};
+const drop=$('#drop');drop.onclick=()=>$('#urdfFile').click();drop.ondragover=e=>{e.preventDefault();drop.classList.add('hover')};drop.ondragleave=()=>drop.classList.remove('hover');drop.ondrop=async e=>{e.preventDefault();drop.classList.remove('hover');upload(e.dataTransfer.files[0])};$('#urdfFile').onchange=e=>upload(e.target.files[0]);
+async function upload(f){if(!f)return;try{const fd=new FormData();fd.append('file',f);drop.textContent='ingesting '+f.name+'…';const d=await api('/api/bodies/ingest',{method:'POST',body:fd});const t=setInterval(async()=>{try{const j=await api('/api/jobs/'+d.job_id);if(j.status==='running'||j.status==='queued')return;clearInterval(t);drop.textContent=j.status==='done'?('registered: '+j.result.name+' ('+j.result.joints+' joints)'):('failed: '+j.error.slice(0,120));loadBodies()}catch(e){clearInterval(t);drop.textContent='ingest failed: '+e.message.slice(0,120)}},1200)}catch(e){drop.textContent='ingest rejected: '+e.message.slice(0,120)}}
+(async()=>{try{const h=await api('/api/health');caps=h.capabilities||{};atlasWindows=h.warm.atlas_windows;const hs=`online · ${h.warm.device} · atlas ${atlasWindows.toLocaleString()}`;$('#health').textContent=hs;$('#health').title=hs;$('#addPrompt').disabled=!caps.perception;$('#addVideo').disabled=!caps.perception;$('#perceptionStatus').textContent=caps.perception?'text + video adapter ready':'optional GENMO adapter not configured';const proto=location.protocol==='https:'?'wss':'ws';const attach=(frame,path,wsPath,msg)=>{const ws=proto+'://'+location.host+wsPath;frame.onload=()=>{try{const st=frame.contentDocument.createElement('style');st.textContent='@media(max-width:640px){.mantine-Paper-root[style*="position: fixed"]{display:none!important}}';frame.contentDocument.head.append(st)}catch(_e){}$(msg).style.display='none'};frame.src=path+'?websocket='+encodeURIComponent(ws)};attach($('#viserFrame'),'/viewer/','/viser-ws','#vpMsg');attach($('#bodyFrame'),'/body-viewer/','/body-viser-ws','#bodyVpMsg');setTimeout(()=>{if($('#vpMsg').style.display!=='none')$('#vpMsg').textContent='viewport is still connecting…'},5000);drawAtlasGraph([]);renderTl();renderSe3();await loadFams();await loadLib();await loadBodies();await loadRecent()}catch(e){$('#health').textContent='service offline';$('#health').title='service offline';$('#health').style.color='var(--r)';$('#health').style.background='var(--r)'}})();
 </script></body></html>

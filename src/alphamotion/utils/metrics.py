@@ -63,6 +63,56 @@ def amplitude_ratio(src_rot6d, src_spec, tgt_rot6d, tgt_spec) -> float:
     return float(np.mean(ratios))
 
 
+def regional_synergy_qc(src_rot6d, src_spec, tgt_rot6d, tgt_spec) -> dict:
+    """Topology-independent limb coordination report.
+
+    The five canonical end effectors are compared in their own root-relative,
+    reach-normalised spaces.  Direction agreement captures pose intent;
+    velocity correlation captures whether each limb changes at the same time.
+    This remains diagnostic rather than a physics claim.
+    """
+    ps = fk_pos(np.asarray(src_rot6d), src_spec)
+    pt = fk_pos(np.asarray(tgt_rot6d), tgt_spec)
+    T = min(len(ps), len(pt))
+    if T < 3:
+        return {"available": False, "reason": "fewer than three frames"}
+    ds = dir_series(ps[:T], _key_idx(src_spec))
+    dt = dir_series(pt[:T], _key_idx(tgt_spec))
+    regions = {}
+    scores = []
+    for key in KEYS:
+        cosine = np.sum(ds[key] * dt[key], axis=-1)
+        vs, vt = np.diff(ds[key], axis=0), np.diff(dt[key], axis=0)
+        active = np.linalg.norm(vs, axis=-1) > 1e-4
+        if int(active.sum()) >= 3:
+            corr = []
+            for axis in range(3):
+                a, b = vs[active, axis], vt[active, axis]
+                if a.std() < 1e-8 or b.std() < 1e-8:
+                    continue
+                corr.append(float(np.corrcoef(a, b)[0, 1]))
+            temporal = float(np.mean(corr)) if corr else 0.0
+        else:
+            temporal = 1.0 if float(np.linalg.norm(vt, axis=-1).mean()) \
+                < 1e-4 else 0.0
+        # Map both terms onto [0,1]. Geometry and robot joint limits make
+        # perfect direction identity unnecessarily strict across embodiments.
+        score = 0.65 * np.clip((float(cosine.mean()) + 1) / 2, 0, 1) \
+            + 0.35 * np.clip((temporal + 1) / 2, 0, 1)
+        regions[key] = {
+            "direction_cosine": round(float(cosine.mean()), 4),
+            "temporal_correlation": round(temporal, 4),
+            "score": round(float(score), 4),
+        }
+        scores.append(float(score))
+    mean = float(np.mean(scores))
+    return {"available": True, "regions": regions,
+            "mean_score": round(mean, 4),
+            "min_score": round(float(np.min(scores)), 4),
+            "passed": bool(mean >= 0.70 and min(scores) >= 0.50),
+            "scope": "root-relative kinematic limb synergy; not contact"}
+
+
 # -------------------------------------------------------------- physical ----
 
 def jerk(rot6d, spec) -> float:
@@ -80,6 +130,48 @@ def limit_hit_frac(q: torch.Tensor, dof: torch.Tensor, margin=0.02) -> float:
     near = (((q - lo[None]) / span[None] < margin)
             | ((hi[None] - q) / span[None] < margin)) & lim[None]
     return float(near[:, lim].double().mean())
+
+
+def continuity_qc(rot6d, root_t, stage, fps: float) -> dict:
+    """Model-independent temporal sanity gate for product traces.
+
+    This checks kinematic continuity only. It deliberately does not claim
+    contact stability or physics validity; those require a controller rollout.
+    """
+    r = torch.as_tensor(np.asarray(rot6d), dtype=torch.float32)
+    R = rot6d_to_matrix(r).numpy()
+    if len(R) < 2:
+        return {"passed": False, "reason": "fewer than two frames"}
+    rel = R[1:] @ np.swapaxes(R[:-1], -1, -2)
+    cos = np.clip((np.trace(rel, axis1=-2, axis2=-1) - 1.0) * 0.5,
+                  -1.0, 1.0)
+    joint_step = np.degrees(np.arccos(cos)).max(axis=1)
+    pose_hold = joint_step < 0.02
+
+    root_step = np.zeros(len(joint_step), np.float64)
+    if root_t is not None:
+        root = np.asarray(root_t, np.float64)
+        root_step = np.linalg.norm(np.diff(root, axis=0), axis=1)
+    root_speed = root_step * float(fps) / 100.0
+    generated = np.asarray(stage, np.int32)[:-1] == 1
+    glide = pose_hold & (root_step > 0.1) & generated
+    generated_count = max(int(generated.sum()), 1)
+    glide_fraction = float(glide.sum() / generated_count)
+    passed = bool(np.isfinite(joint_step).all()
+                  and np.isfinite(root_speed).all()
+                  and float(joint_step.max()) < 90.0
+                  and float(root_speed.max(initial=0.0)) < 8.0
+                  and glide_fraction <= 0.10)
+    return {
+        "passed": passed,
+        "pose_hold_fraction": round(float(pose_hold.mean()), 4),
+        "generated_glide_fraction": round(glide_fraction, 4),
+        "joint_step_deg_p99": round(float(np.percentile(joint_step, 99)), 3),
+        "joint_step_deg_max": round(float(joint_step.max()), 3),
+        "root_speed_m_s_p99": round(float(np.percentile(root_speed, 99)), 3),
+        "root_speed_m_s_max": round(float(root_speed.max(initial=0.0)), 3),
+        "scope": "kinematic continuity; not a physics rollout",
+    }
 
 
 # ------------------------------------------------------------------ arms ----

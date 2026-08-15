@@ -27,54 +27,46 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
     import mujoco as mj
     import viser
     from scipy.spatial.transform import Rotation
-
     from ..engine.descriptor import build_from_mjcf
     from ..engine.trace import MotionTrace
+    from .kinematics import (apply_ground_safe_pose, first_frame_ground_height,
+                             free_root_address, joint_qpos_map,
+                             root_world_offsets, source_joint_map,
+                             visual_mesh_geom_ids)
     tr = MotionTrace.load(trace_path)
     model = mj.MjModel.from_xml_path(xml)
     data = mj.MjData(model)
     spec, dof, rest, qnames, _ = build_from_mjcf(xml, body)
-    tab = -np.ones((spec.J, 3), np.int64)
-    for j, names in enumerate(qnames):
-        for k, name in enumerate(names):
-            jid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
-            if jid >= 0:
-                tab[j, k] = int(model.jnt_qposadr[jid])
+    tab = joint_qpos_map(model, qnames)
     # the attached mesh MJCF may carry more/other joints than the descriptor
     # the trace was built with (e.g. h1 with hands vs the 20-joint cache spec);
     # map the trace's q columns onto the mesh's slots BY JOINT NAME
-    src_of = list(range(spec.J))
-    if getattr(tr, "joint_names", None):
-        lut = {n: i for i, n in enumerate(tr.joint_names)}
-        src_of = [lut.get(n, -1) for n in spec.joint_names]
-    roots = [int(model.jnt_qposadr[j]) for j in range(model.njnt)
-             if model.jnt_type[j] == mj.mjtJoint.mjJNT_FREE]
-    root_adr = roots[0] if roots else -1
-    gids = [i for i in range(model.ngeom)
-            if model.geom_type[i] == mj.mjtGeom.mjGEOM_MESH
-            and model.geom_group[i] == 1] or \
-        [i for i in range(model.ngeom)
-         if model.geom_type[i] == mj.mjtGeom.mjGEOM_MESH]
-    AX = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], np.float64)
+    src_of = source_joint_map(spec, tr)
+    root_adr = free_root_address(model)
+    gids = visual_mesh_geom_ids(model)
+    ground_z = first_frame_ground_height(
+        model, data, tr, spec, tab, src_of, root_adr)
+    offsets = root_world_offsets(getattr(tr, "root_t", None), tr.frames)
+    if getattr(tr, "root_t", None) is None and root_adr >= 0:
+        from ..engine.odometry import foot_bodies, stance_offsets
+        feet = foot_bodies(model)
+        foot_world = np.zeros((tr.frames, len(feet), 3))
+        for t in range(tr.frames):
+            apply_ground_safe_pose(
+                model, data, tr, spec, tab, src_of, root_adr, t,
+                (0.0, 0.0, ground_z))
+            for i, bid in enumerate(feet):
+                foot_world[t, i] = data.xpos[bid]
+        if len(feet):
+            offsets[:, :2] = stance_offsets(foot_world)
 
     T = tr.frames
     pos = np.zeros((T, len(gids), 3), np.float32)
     wxyz = np.zeros((T, len(gids), 4), np.float32)
     for t in range(T):
-        data.qpos[:] = model.qpos0
-        if root_adr >= 0:
-            pm = tr.gp[t] @ AX / 100.0
-            data.qpos[root_adr:root_adr + 3] = [0, 0, -float(pm[:, 2].min())]
-            data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
-                AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
-        for j in range(spec.J):
-            sj = src_of[j]
-            if sj < 0 or sj >= tr.q.shape[1]:
-                continue
-            for k in range(3):
-                if tab[j, k] >= 0:
-                    data.qpos[tab[j, k]] = tr.q[t, sj, k]
-        mj.mj_forward(model, data)
+        xyz = offsets[t].copy(); xyz[2] += ground_z
+        apply_ground_safe_pose(model, data, tr, spec, tab, src_of, root_adr,
+                               t, xyz)
         for i, gid in enumerate(gids):
             pos[t, i] = data.geom_xpos[gid]
             wxyz[t, i] = Rotation.from_matrix(
@@ -83,6 +75,10 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
     server = viser.ViserServer(port=port)
     server.scene.set_up_direction("+z")
     server.scene.add_grid("/floor", width=6, height=6, plane="xy")
+    server.gui.configure_theme(
+        control_layout="collapsible", control_width="small",
+        dark_mode=True, show_logo=False, show_share_button=False,
+        brand_color=(255, 126, 0))
     handles = []
     for i, gid in enumerate(gids):
         mid = model.geom_dataid[gid]
@@ -93,6 +89,8 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
         rgba = model.geom_rgba[gid]
         if abs(float(rgba[0]) - 0.5) < 0.01 and abs(float(rgba[1]) - 0.5) < 0.01:
             color = (232, 148, 60)
+        elif float(np.max(rgba[:3])) < 0.18:
+            color = (173, 181, 191)
         else:
             color = tuple(int(255 * c) for c in rgba[:3])
         handles.append(server.scene.add_mesh_simple(
@@ -109,10 +107,26 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
             h.wxyz = wxyz[t, i]
     frame.on_update(lambda _: show(int(frame.value)))
     show(0)
+
+    flat = pos.reshape(-1, 3)
+    lo, hi = flat.min(axis=0), flat.max(axis=0)
+    center = (lo + hi) * 0.5
+    radius = float(np.clip(np.linalg.norm(hi - lo) * 0.58, 0.9, 3.0))
+
+    @server.on_client_connect
+    def configure_camera(client):
+        client.camera.up_direction = (0.0, 0.0, 1.0)
+        client.camera.position = tuple(
+            center + np.asarray([1.7, -2.2, 1.25]) * radius)
+        client.camera.look_at = tuple(center)
+        client.camera.fov = 0.8
+
     print(f"VISER READY frames={T}", flush=True)
     while True:
         if play.value:
-            frame.value = (int(frame.value) + 1) % T
+            t = (int(frame.value) + 1) % T
+            frame.value = t
+            show(t)
         time.sleep(1.0 / max(tr.fps, 1))
 
 

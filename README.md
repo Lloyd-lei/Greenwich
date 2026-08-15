@@ -3,13 +3,14 @@
 **One motion, every robot. A motion space you can navigate, not just sample.**
 
 AlphaMotion is a natively cross-embodiment motion engine: a single latent
-motion space shared by humans and 20+ humanoid robots, with a constraint-native
+motion space shared by a human skeleton and 18 humanoid robot topologies, with
+a constraint-native
 temporal layer and a searchable index over everything it has ever seen or
 generated. This is a pre-release build under active internal benchmarking.
 
 ```bash
 pip install -e .            # Linux / Windows 11, Python >= 3.10
-alphamotion download        # ~300 MB of weights + atlas from the hub
+alphamotion download        # ~1 GB: weights + Atlas + lossless motion assets
 alphamotion serve           # open http://127.0.0.1:7860
 ```
 
@@ -26,16 +27,17 @@ one you ingest yourself. Drop a URDF and the pipeline parses it, injects a
 floating base, audits its joint limits, labels every joint semantically
 (the same frozen text tower the codec was trained with), and configures a
 per-robot refiner — automatically, with an honest report of anything wrong.
-Zero-shot: the engine has never trained on your robot.
+An uploaded robot is handled zero-shot: no robot-specific codec retraining is
+performed during registration.
 
 **2 · The Atlas Map.** Every motion — corpus or generated — reduces to 32
 discrete *rainbow codes*. The Atlas is a fixed-capacity index (65,536 windows,
 a few MB) over these codes: any band of any motion's "DNA" is a **portal** into
 every other motion that passes through the same code. Motion space becomes a
 graph you can search (`portals`, `knn`, `walk` in `alphamotion.atlas.search`),
-wander, and jump through — including into motions the model just generated,
-which register into the Atlas on completion. No other motion stack exposes its
-latent space as a navigable, queryable structure.
+wander, and jump through — including into release-approved motions the model
+just generated. QC-flagged traces remain auditable but never enter the shared
+graph.
 
 **3 · A constraint-native editor.** The temporal layer is a bridge prior
 `P(interior | start, goal, n)`: endpoints are inputs, not accidents. The
@@ -44,10 +46,13 @@ motions and SE(3) task-space constraints — and the **time budget `n` is a
 first-class dial**: the same 32 tokens render at any duration (retiming is a
 model property, verified, not a resampling trick).
 
-**4 · A generative library, not a motion zoo.** The bundled library is 4,096
-family-balanced clips in 23 MB — because each entry is stored as tokens plus
-four boundary frames and is *regenerated* on demand, at any length, on any
-body.
+**4 · A compact editable library, not a lossy demo reel.** The bundled library
+contains 4,096 clips spanning 11 labeled motion families. Its 32-token
+summaries and boundary
+codes drive Atlas search, bridges and retiming, while a ~600 MB nibble-packed
+dual-stream code store preserves native playback exactly. The package does not
+pretend that Equator can reconstruct a rotation stream it was never trained to
+generate.
 
 **5 · It grades its own homework.** Every generation passes a refiner
 (conditional: it measures before it touches) and a **synergy gate** — the
@@ -65,7 +70,7 @@ from packaged artifacts:
 |---|---|
 | codec round-trip fidelity | 0.64 (chance-corrected) |
 | cross-body follow score | 0.42 (pipeline floor 0.00) |
-| atlas portal precision@8 | 6.1× random |
+| atlas portal precision@8 | 7.1× random |
 | retiming self-consistency | 0.87 |
 | synergy gate pass rate | 61 % over 3 bodies × 12 clips |
 
@@ -79,15 +84,24 @@ from packaged artifacts:
 
 ## Honest limitations
 
-- Rendering (mp4/viser) needs robot meshes; bundled bodies ship *descriptors
-  only* (vendor meshes are not redistributable) — attach an MJCF once, or
-  ingest your own URDF, and rendering lights up.
+- Twelve bundled bodies currently have verified local visual assets; the
+  remaining registered topologies are analysis-only until their vendor meshes
+  are attached. Uploaded URDF or zipped URDF packages are validated before
+  registration.
 - The synergy gate genuinely fails some body × clip combinations (that is what
   it is for); per-body pass rates are in the benchmark.
-- Bridging novel endpoint pairs costs ~1.3 nats over re-sampling known ones —
+- Bridging novel endpoint pairs costs ~1.0 nat over re-sampling known ones —
   a measured extrapolation cost, tracked in the gate, on the roadmap to shrink.
-- World translation is not yet part of the representation (root trajectories
-  come from stride integration on the roadmap).
+- Source world-root trajectories are preserved and generated gaps receive a
+  continuous boundary-velocity bridge. The spatial position head remains
+  root-relative; it is not presented as a learned world-trajectory head.
+- Viser and MP4 outputs are kinematic product previews, not physics or WBC
+  rollouts. Physical stability requires a downstream controller evaluation.
+
+Release acceptance and its exact commands are documented in
+[docs/PRODUCT_ACCEPTANCE.md](docs/PRODUCT_ACCEPTANCE.md).
+The implementation boundary and optional dependencies are recorded in
+[docs/RELEASE_SCOPE.md](docs/RELEASE_SCOPE.md).
 
 ## License
 

@@ -2,10 +2,9 @@
 inside this process, ffmpeg from imageio-ffmpeg's bundled binary (no system
 dependency). viser is the interactive surface; this is the export surface.
 
-Rendering needs the robot's MJCF with meshes. Bundled bodies ship without
-meshes (vendor assets are not redistributable); attach an xml once via
-registry meta or ALPHAMOTION_ROBOT_ASSETS, after which rendering works.
-User-ingested URDFs render out of the box (their meshes are local).
+Rendering needs the robot's MJCF with meshes. Verified local assets are used
+for bundled bodies when available; user-ingested URDFs keep their local mesh
+references and render after registration.
 """
 from __future__ import annotations
 
@@ -16,17 +15,16 @@ import numpy as np
 from ..config import setup_gl_backend
 from ..engine.trace import MotionTrace
 
-AX = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], np.float64)  # Y-up -> Z-up
-
 
 def render_trace(tr: MotionTrace, xml: str, body: str,
                  width: int = 640, height: int = 560,
                  follow: bool = True) -> np.ndarray:
     setup_gl_backend()
     import mujoco as mj
-    from scipy.spatial.transform import Rotation
-
     from ..engine.descriptor import build_from_mjcf
+    from .kinematics import (apply_ground_safe_pose, first_frame_ground_height,
+                             free_root_address, joint_qpos_map,
+                             root_world_offsets, source_joint_map)
     # vendor MJCFs ship the robot alone — no floor, no light — so offscreen
     # exports came out as a dim robot on black. Stage it: ground plane +
     # overhead light, and a bright headlight.
@@ -49,45 +47,26 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
     model.vis.headlight.specular[:] = [0.2, 0.2, 0.2]
     data = mj.MjData(model)
     spec, dof, rest, qnames, _ = build_from_mjcf(xml, body)
-    tab = -np.ones((spec.J, 3), np.int64)
-    for j, names in enumerate(qnames):
-        for k, name in enumerate(names):
-            jid = mj.mj_name2id(model, mj.mjtObj.mjOBJ_JOINT, name)
-            if jid >= 0:
-                tab[j, k] = int(model.jnt_qposadr[jid])
+    tab = joint_qpos_map(model, qnames)
     # the attached mesh MJCF may carry more/other joints than the descriptor
     # the trace was built with (e.g. h1 with hands vs the 20-joint cache spec);
     # map the trace's q columns onto the mesh's slots BY JOINT NAME
-    src_of = list(range(spec.J))
-    if getattr(tr, "joint_names", None):
-        lut = {n: i for i, n in enumerate(tr.joint_names)}
-        src_of = [lut.get(n, -1) for n in spec.joint_names]
-    roots = [int(model.jnt_qposadr[j]) for j in range(model.njnt)
-             if model.jnt_type[j] == mj.mjtJoint.mjJNT_FREE]
-    root_adr = roots[0] if roots else -1
+    src_of = source_joint_map(spec, tr)
+    root_adr = free_root_address(model)
+    ground_z = first_frame_ground_height(
+        model, data, tr, spec, tab, src_of, root_adr)
 
     mj.mj_forward(model, data)
     h0 = float(data.geom_xpos[:, 2].max() - data.geom_xpos[:, 2].min()) or 1.0
     cam = mj.MjvCamera()
-    cam.lookat[:] = [0, 0, h0 * 0.55]
+    cam.lookat[:] = [0, 0, ground_z + h0 * 0.55]
     cam.distance, cam.elevation, cam.azimuth = 3.1 * h0, -10, 160
 
-    def pose_at(t, off_xy):
-        data.qpos[:] = model.qpos0
-        if root_adr >= 0:
-            pm = tr.gp[t] @ AX / 100.0
-            data.qpos[root_adr:root_adr + 3] = \
-                [off_xy[0], off_xy[1], -float(pm[:, 2].min())]
-            data.qpos[root_adr + 3:root_adr + 7] = Rotation.from_matrix(
-                AX.T @ tr.rootR[t] @ AX).as_quat(scalar_first=True)
-        for j in range(spec.J):
-            sj = src_of[j]
-            if sj < 0 or sj >= tr.q.shape[1]:
-                continue
-            for k in range(3):
-                if tab[j, k] >= 0:
-                    data.qpos[tab[j, k]] = tr.q[t, sj, k]
-        mj.mj_forward(model, data)
+    def pose_at(t, offset):
+        xyz = np.asarray(offset, np.float64).copy()
+        xyz[2] += ground_z
+        apply_ground_safe_pose(model, data, tr, spec, tab, src_of, root_adr,
+                               t, xyz)
 
     # world translation. Preferred: the trace's DATA root trajectory (owner
     # design — first frame = origin; trajectory continuity beats foot
@@ -96,25 +75,25 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
     # NOT @AX, NOT the rotation conjugation — those landed 80-100 deg off).
     # Fallback: contact-derived stride odometry on the posed mesh.
     from ..engine.odometry import foot_bodies, stance_offsets
-    off = np.zeros((tr.frames, 2))
+    off = np.zeros((tr.frames, 3))
     if getattr(tr, "root_t", None) is not None:
-        off = np.stack([tr.root_t[:, 2], tr.root_t[:, 0]], 1) / 100.0
+        off = root_world_offsets(tr.root_t, tr.frames)
     elif root_adr >= 0:
         fb = foot_bodies(model)
         fw = np.zeros((tr.frames, len(fb), 3))
         for t in range(tr.frames):
-            pose_at(t, (0.0, 0.0))
+            pose_at(t, (0.0, 0.0, 0.0))
             for i, b in enumerate(fb):
                 fw[t, i] = data.xpos[b]
-        off = stance_offsets(fw)
+        off[:, :2] = stance_offsets(fw)
 
     # camera: when the motion travels, look at the path's midpoint from the
     # SIDE (azimuth perpendicular to the net displacement) so the walk crosses
     # the frame laterally — head-on, a 60 cm walk reads as treadmill.
-    span = off.max(0) - off.min(0)
-    travel = float(np.linalg.norm(off[-1]))
+    span = off[:, :2].max(0) - off[:, :2].min(0)
+    travel = float(np.linalg.norm(off[-1, :2]))
     if travel > 0.25 and not follow:
-        mid = (off.max(0) + off.min(0)) / 2.0
+        mid = (off[:, :2].max(0) + off[:, :2].min(0)) / 2.0
         cam.lookat[0], cam.lookat[1] = mid
         heading = np.degrees(np.arctan2(off[-1, 1] - off[0, 1],
                                         off[-1, 0] - off[0, 0]))
@@ -127,7 +106,11 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
     for t in range(tr.frames):
         pose_at(t, off[t])
         if follow:
-            cam.lookat[0], cam.lookat[1] = off[t]
+            cam.lookat[0], cam.lookat[1] = off[t, :2]
+            # Follow locomotion in the ground plane, but keep the vertical
+            # datum fixed. Following root Z made jumps look stationary and
+            # hid exactly the airborne motion the export is meant to show.
+            cam.lookat[2] = ground_z + h0 * 0.55
         rend.update_scene(data, cam)
         frames[t] = rend.render()
     del rend

@@ -25,13 +25,30 @@ class MotionTrace:
     target: str = ""
     tokens: np.ndarray | None = None      # the 32 rainbow codes, when known
     joint_names: list | None = None       # q columns, for name-based render mapping
-    root_t: np.ndarray | None = None      # [T,3] cm world root translation (odometry)
+    root_t: np.ndarray | None = None      # [T,3] cm world root translation
 
     def __post_init__(self):
         T = len(self.q)
-        assert self.rootR.shape == (T, 3, 3), self.rootR.shape
-        assert self.gp.shape[0] == T and self.gp.shape[-1] == 3
-        assert len(self.stage) == T
+        if self.q.ndim != 3 or self.q.shape[-1] != 3:
+            raise ValueError(f"q must be time-major [T,J,3], got {self.q.shape}")
+        if self.rootR.shape != (T, 3, 3):
+            raise ValueError(f"rootR must be ({T},3,3), got {self.rootR.shape}")
+        if self.gp.shape != (T, self.q.shape[1], 3):
+            raise ValueError(f"gp must be time-major [T,J,3], got {self.gp.shape}")
+        if len(self.stage) != T:
+            raise ValueError("stage must contain one value per frame")
+        if not np.isin(self.stage, (0, 1, 2)).all():
+            raise ValueError("stage values must be 0, 1 or 2")
+        if not np.isfinite(self.fps) or self.fps <= 0:
+            raise ValueError("fps must be finite and positive")
+        if self.joint_names is not None and len(self.joint_names) != self.q.shape[1]:
+            raise ValueError("joint_names must contain one name per q joint")
+        if self.root_t is not None and np.asarray(self.root_t).shape != (T, 3):
+            raise ValueError(f"root_t must be ({T},3)")
+        for name, value in (("q", self.q), ("rootR", self.rootR),
+                            ("gp", self.gp), ("root_t", self.root_t)):
+            if value is not None and not np.isfinite(value).all():
+                raise ValueError(f"{name} contains NaN or infinity")
 
     @property
     def frames(self) -> int:

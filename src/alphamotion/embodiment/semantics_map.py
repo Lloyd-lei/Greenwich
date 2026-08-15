@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 
+import numpy as np
 import torch
 
 from ..paths import assets_root, cache_dir
@@ -88,3 +89,75 @@ def build_name_embeddings(names: list[str], device: str = "cuda") -> dict:
 
 def embed_matrix(names: list[str], lookup: dict) -> torch.Tensor:
     return torch.stack([lookup[n] for n in names], 0)
+
+
+def deterministic_part_labels(spec) -> dict[str, str]:
+    """Complete topology-aware semantic labels without a text model.
+
+    Joint names are authoritative when they carry a clear body-part signal.
+    Anonymous or vendor-specific names are assigned to the closest canonical
+    extremity in graph distance.  This guarantees that every uploaded joint
+    is inspectable even when the optional Qwen labeling dependency is absent.
+    """
+    from ..engine.nets.blocks import hop_distance
+    from ..engine.spatial import key_joints
+
+    names = [normalize_joint_name(n) for n in spec.joint_names]
+    keys, _key_names, tags = key_joints(spec)
+    key = dict(zip(tags, keys))
+    hop = np.asarray(hop_distance(spec.parents))
+    root = key["root"]
+    anchors = {
+        "head": key["head"],
+        "left arm": key["l_wrist"],
+        "right arm": key["r_wrist"],
+        "left leg": key["l_ankle"],
+        "right leg": key["r_ankle"],
+        "torso": root,
+    }
+
+    def explicit(name: str) -> str | None:
+        left = bool(re.search(r"(^|\s)(left|l)(\s|$)", name))
+        right = bool(re.search(r"(^|\s)(right|r)(\s|$)", name))
+        arm = any(x in name for x in
+                  ("arm", "shoulder", "elbow", "wrist", "hand", "clav"))
+        leg = any(x in name for x in
+                  ("leg", "hip", "knee", "ankle", "foot", "toe", "thigh",
+                   "shin", "calf"))
+        if left and arm:
+            return "left arm"
+        if right and arm:
+            return "right arm"
+        if left and leg:
+            return "left leg"
+        if right and leg:
+            return "right leg"
+        if any(x in name for x in ("head", "neck")):
+            return "head"
+        if any(x in name for x in
+               ("root", "pelvis", "waist", "spine", "torso", "chest",
+                "trunk", "base")):
+            return "torso"
+        return None
+
+    out: dict[str, str] = {}
+    for j, (raw, name) in enumerate(zip(spec.joint_names, names)):
+        label = explicit(name)
+        if label is None:
+            # Torso gets a small prior because all branches meet at the root;
+            # otherwise anonymous shoulder/hip joints are over-assigned to an
+            # extremity merely because that limb happens to be short.
+            scores = {part: float(hop[j, idx])
+                      for part, idx in anchors.items()}
+            scores["torso"] -= 0.35
+            label = min(scores, key=scores.get)
+        out[str(raw)] = label
+
+    # Canonical anchors must never be mislabeled by an ambiguous vendor name.
+    for tag, part in (("root", "torso"), ("head", "head"),
+                      ("l_wrist", "left arm"),
+                      ("r_wrist", "right arm"),
+                      ("l_ankle", "left leg"),
+                      ("r_ankle", "right leg")):
+        out[str(spec.joint_names[key[tag]])] = part
+    return out

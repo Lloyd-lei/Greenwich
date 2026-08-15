@@ -13,8 +13,9 @@ Data flow of every generation:
 ```
 segments (library tokens / bridges / perception) 
   → codes [T,256,20] → Greenwich.decode(target) → Refiner (conditional)
-  → Synergy gate (≥0.70 likelihood ratio) → arm QC → MotionTrace (.npz)
-  → DB row (family/duration/source) → Atlas registration + edges → [mp4]
+  → Synergy gate (≥0.70 likelihood ratio) → four-limb + continuity QC
+  → MotionTrace (.npz) → DB row (family/duration/source)
+  → [release-approved only: Atlas registration + edges] → [mp4]
 ```
 
 ## SDK quickstart
@@ -29,12 +30,20 @@ from alphamotion.embodiment import registry
 gw, eq = Greenwich.load(), Equator.load()
 lib, atlas = load_library(), load_atlas()
 
-# play a library clip on a robot, at 2x duration
+# play a library clip on a robot, at its native duration
 tok, bounds, name, family = lib.entry(3)
-ep    = eq.endpoints_from_codes(torch.from_numpy(bounds))
-codes = eq.detokenize(torch.from_numpy(tok).to(eq.device), ep, n_frames=120)
+codes = torch.from_numpy(lib.raw_codes(3)).to(eq.device)
 emb   = registry.load("unitree_h1")
-rot6d = gw.decode(codes, emb.spec, emb.dof)          # [120, J, 6] global
+rot6d = gw.decode(codes, emb.spec, emb.dof)          # [60, J, 6] global
+
+# Retiming preserves the raw rotation stream by lattice interpolation; the
+# service's timeline editor performs this complete operation automatically.
+from alphamotion.engine.timeline import interpolate_lattice
+ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
+rot_codes = interpolate_lattice(codes[:, 128:], 120)
+codes_2x = eq.detokenize(torch.from_numpy(tok).to(eq.device), ep, 120,
+                        boundary_codes=torch.stack([codes[0], codes[-1]]),
+                        rot_codes=rot_codes)
 
 # bridge two clips (the editor's gap)
 codes_b = eq.detokenize(eq.sample_tokens(ep_gap, 45), ep_gap, 45)
@@ -60,7 +69,8 @@ arm QC, re-encode fidelity); `utils/eval_gate.py` is the release gate.
 - Key endpoints: `POST /api/jobs/play`, `POST /api/jobs/timeline`
   (segments: `library|gap|prompt|video`, per-segment `n`, `pins`, plus `se3`
   constraints), `POST /api/bodies/ingest` (URDF upload), `GET
-  /api/atlas/portals/{motion_id}`, `GET /api/results/{file}`.
+  /api/atlas/portals/{motion_id}`, `POST /api/assets/video`, `POST
+  /api/bodies/{name}/preview`, `GET /api/results/{file}`.
 
 ## URDF ingest contract
 
@@ -68,8 +78,9 @@ arm QC, re-encode fidelity); `utils/eval_gate.py` is the release gate.
 1. `MjSpec.from_file` + injected freejoint (URDF has no floating base), meshdir
    anchored absolute; 2. descriptor via the exact bundled-robot pipeline; 3.
    limit census (unlimited / zero-span / non-hinge — reported, not hidden); 4.
-   Qwen3 semantic labels (+ geometric fallback) — **the encoder choice is
-   baked into the codec checkpoint; do not substitute**; 5. refiner config.
+   Qwen3 semantic labels (+ complete topology/name fallback) — **the encoder
+   choice is baked into the codec checkpoint; do not substitute it for model
+   conditioning**; 5. refiner config.
 Registered bodies decode zero-shot.
 
 ## Refiner + synergy gate
@@ -91,7 +102,7 @@ silent zero.
 
 ## Cross-platform notes
 
-GL backend chosen per-platform inside render processes only (EGL on Linux,
+GL backend chosen before MuJoCo import (EGL on Linux,
 WGL default on Windows); mp4 via imageio-ffmpeg's bundled binary; HF cache
 symlinks disabled for Windows; subprocesses always `sys.executable`-resolved;
 `tests/unit/test_paths_portability.py` blocks any machine-local literal from
@@ -99,7 +110,7 @@ entering the package.
 
 ## Release procedure
 
-1. `pytest tests/unit` all green.
+1. `pytest tests/unit` all green on Linux and Windows CI.
 2. `alphamotion eval` all green → refresh `docs/BENCHMARK.md`.
 3. `python scripts/export_weights.py && python scripts/build_atlas.py &&
    python scripts/build_library.py` (research machine).
