@@ -21,6 +21,7 @@ ARTIFACTS = {
     "equator_a": ("equator_a", ("model.safetensors", "config.json")),
     "equator_b": ("equator_b", ("model.safetensors", "config.json")),
     "atlas": ("atlas", ("atlas.npz", "atlas_meta.json")),
+    "library": ("library", ("library.npz", "library_meta.json")),
     "embodiments": ("embodiments", ("name_embeddings.pt",)),
 }
 

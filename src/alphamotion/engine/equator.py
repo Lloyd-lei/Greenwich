@@ -76,6 +76,14 @@ class Equator:
             codes[-1, :128] = boundary_codes[1, :128].to(self.device)
         return codes
 
+    @torch.no_grad()
+    def endpoints_from_codes(self, codes4: torch.Tensor):
+        """[4,256,20] boundary codes (start[0:2] + goal[-2:]) -> endpoint
+        features. This is what makes a library entry fully generative: 32
+        tokens + 4 boundary frames regenerate the motion at any duration on
+        any body."""
+        return self.a3.endpoints(codes4[None].long().to(self.device))
+
     # ------------------------------------------------------------- prior ----
     @torch.no_grad()
     def sample_tokens(self, endpoints, n_frames: int, temperature: float = 0.9,
