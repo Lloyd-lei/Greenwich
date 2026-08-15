@@ -7,3 +7,4 @@ dist/
 .venv/
 *.mp4
 *.npz.tmp
+weights_staging/

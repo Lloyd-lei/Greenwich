@@ -112,7 +112,7 @@ class Equator:
     def token_nll(self, tokens: torch.Tensor, endpoints, n_frames: int):
         """Per-token NLL of a GIVEN sequence under B3 (full mask) — the
         synergy-gate ruler."""
-        tok = tokens[None].to(self.device)
+        tok = tokens[None].long().to(self.device)
         mask = torch.ones_like(tok, dtype=torch.bool)
         nf = torch.tensor([float(n_frames)], device=self.device)
         logits = self.b3(tok, mask, endpoints, nf)
