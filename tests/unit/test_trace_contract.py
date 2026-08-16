@@ -9,12 +9,14 @@ def test_roundtrip(tmp_path):
                      gp=np.zeros((T, J, 3)), stage=np.ones(T, np.int32),
                      fps=30.0, title="t", target="b",
                      tokens=np.arange(32, dtype=np.int32),
-                     root_t=np.arange(T * 3, dtype=np.float32).reshape(T, 3))
+                     root_t=np.arange(T * 3, dtype=np.float32).reshape(T, 3),
+                     contact_stabilized=True)
     p = tr.save(tmp_path / "x.npz")
     tr2 = MotionTrace.load(p)
     assert tr2.frames == T and tr2.title == "t"
     assert (tr2.tokens == tr.tokens).all()
     assert (tr2.root_t == tr.root_t).all()
+    assert tr2.contact_stabilized is True
 
 
 def test_rejects_bad_root_shape():

@@ -1,0 +1,17 @@
+{
+  "booster_k1": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/booster_k1/K1_serial.xml",
+  "booster_t1": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/booster_t1/T1_serial.xml",
+  "booster_t1_29dof": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/booster_t1_29dof/t1_mocap.xml",
+  "engineai_pm01": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/engineai_pm01/pm_v2.xml",
+  "fourier_gr3": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/fourier_gr3v2_1_1/mjcf/gr3v2_1_1.xml",
+  "fourier_n1": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/fourier_n1/n1_mocap.xml",
+  "hightorque_hi": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/hightorque_hi/hi_25dof.xml",
+  "kuavo_s45": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/kuavo_s45/biped_s45_collision.xml",
+  "pal_talos": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/pal_talos/talos.xml",
+  "pnd_adam_lite": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/pnd_adam_lite/adam_lite.xml",
+  "tienkung": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/tienkung/mjcf/tienkung.xml",
+  "unitree_g1_23dof": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/unitree_g1/g1_mocap_29dof.xml",
+  "unitree_g1_29dof": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/unitree_g1/g1_mocap_29dof.xml",
+  "unitree_h1": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/unitree_h1/h1.xml",
+  "unitree_h1_2": "/media/sajio/New Volume/CodexDeployments/Greenwich/sources/GMR/assets/unitree_h1_2/h1_2_handless.xml"
+}

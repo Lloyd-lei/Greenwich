@@ -26,6 +26,7 @@ class MotionTrace:
     tokens: np.ndarray | None = None      # the 32 rainbow codes, when known
     joint_names: list | None = None       # q columns, for name-based render mapping
     root_t: np.ndarray | None = None      # [T,3] cm world root translation
+    contact_stabilized: bool = False      # root_t already solved on target feet
 
     def __post_init__(self):
         T = len(self.q)
@@ -64,6 +65,8 @@ class MotionTrace:
             extra["joint_names"] = np.asarray(self.joint_names)
         if self.root_t is not None:
             extra["root_t"] = np.asarray(self.root_t, np.float32)
+        extra["contact_stabilized"] = np.asarray(
+            bool(self.contact_stabilized), np.uint8)
         np.savez_compressed(path, q=self.q, rootR=self.rootR, gp=self.gp,
                             stage=self.stage.astype(np.int32),
                             fps=np.float32(self.fps),
@@ -84,4 +87,6 @@ class MotionTrace:
                    tokens=d["tokens"] if "tokens" in d else None,
                    joint_names=[str(x) for x in d["joint_names"]]
                    if "joint_names" in d else None,
-                   root_t=d["root_t"] if "root_t" in d else None)
+                   root_t=d["root_t"] if "root_t" in d else None,
+                   contact_stabilized=bool(d["contact_stabilized"])
+                   if "contact_stabilized" in d else False)

@@ -36,7 +36,8 @@ class AMConfig:
     device: str = field(default_factory=default_device)
     host: str = os.environ.get("ALPHAMOTION_HOST", "127.0.0.1")
     port: int = int(os.environ.get("ALPHAMOTION_PORT", "7860"))
-    viewer_ports: tuple[int, int] = (7871, 7876)   # inclusive-exclusive pool
+    # target motion, body audit, and independent SMPL-X source comparison.
+    viewer_ports: tuple[int, int, int] = (7871, 7876, 7877)
     hf_repo: str = os.environ.get("ALPHAMOTION_HF_REPO", "lloydlei/Greenwich")
     # perception (optional): python executable of the env that runs GENMO
     genmo_python: str = os.environ.get("ALPHAMOTION_GENMO_PYTHON", "")

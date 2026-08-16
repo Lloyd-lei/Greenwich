@@ -11,6 +11,7 @@ import asyncio
 import datetime as dt
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -37,7 +38,13 @@ FRONTEND = Path(__file__).parent.parent / "assets" / "frontend"
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AlphaMotion", version="0.1.0")
-    state: dict = {"library": None, "warm": None}
+    state: dict = {"library": None, "warm": None,
+                   "library_previews": OrderedDict(),
+                   "timeline_previews": OrderedDict(),
+                   "edit_previews": OrderedDict(),
+                   "source_skins": OrderedDict(),
+                   "sync_comparison": False,
+                   "viewer_revision": 0}
 
     @app.on_event("startup")
     async def _startup():
@@ -50,6 +57,14 @@ def create_app() -> FastAPI:
         state["library"] = load_library()
         state["live"] = LiveViewer(CONFIG.viewer_ports[0])
         state["body_live"] = LiveViewer(CONFIG.viewer_ports[1])
+        def source_finished():
+            if state.get("sync_comparison"):
+                state["live"].set_transport(play=False)
+        state["source_live"] = LiveViewer(
+            CONFIG.viewer_ports[2], loop_playback=False, autoplay=False,
+            on_playback_end=source_finished)
+        state["live"].link_camera_peer(state["source_live"])
+        state["source_live"].link_camera_peer(state["live"])
         state["restored_motion"] = None
 
         # Async jobs cannot resume across a process restart. Leaving their
@@ -114,6 +129,8 @@ def create_app() -> FastAPI:
                 "viewer": state["live"].url if state.get("live") else None,
                 "body_viewer": state["body_live"].url
                 if state.get("body_live") else None,
+                "source_viewer": state["source_live"].url
+                if state.get("source_live") else None,
                 "restored_motion": state.get("restored_motion"),
                 "capabilities": {
                     "perception": perception["ready"],
@@ -189,9 +206,143 @@ def create_app() -> FastAPI:
                 limit: int = Query(default=24, ge=1, le=100)):
         return state["library"].search(q, family, offset, limit)
 
+    @app.get("/api/library/{library_id}/preview")
+    async def library_preview(library_id: int):
+        """Metadata for the neutral SMPL-X hover preview."""
+        lib = state["library"]
+        if library_id < 0 or library_id >= len(lib):
+            raise HTTPException(404, "no such library clip")
+        return {"id": int(library_id), "name": lib.names[library_id],
+                "family": lib.families[library_id],
+                "frames": int(lib.window), "fps": 30.0,
+                "skin": "SMPL-X neutral",
+                "url": f"/api/library/{library_id}/preview.webp"}
+
+    def _source_skin(library_id: int):
+        lib = state["library"]
+        cache = state["source_skins"]
+        if library_id in cache:
+            cache.move_to_end(library_id)
+            return cache[library_id]
+        from ..viz.smplx_skin import skin_global_rot6d
+        spec, dof, _rest = POOL.human
+        codes = torch.from_numpy(
+            lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
+        rot = POOL.greenwich.decode(codes, spec, dof)
+        root = lib.root_delta(library_id, "human_smpl")
+        vertices, faces = skin_global_rot6d(
+            rot.cpu().numpy(), spec.parents, root_cm=root, device=POOL.device)
+        value = (vertices, faces, lib.names[library_id], 30.0)
+        cache[library_id] = value
+        cache.move_to_end(library_id)
+        while len(cache) > 4:
+            cache.popitem(last=False)
+        return value
+
+    @app.get("/api/library/{library_id}/preview.webp")
+    async def library_skin_preview(library_id: int):
+        """Fixed-camera SMPL-X skin animation at 1x with a 0.5s loop hold."""
+        lib = state["library"]
+        if library_id < 0 or library_id >= len(lib):
+            raise HTTPException(404, "no such library clip")
+        from ..paths import cache_dir
+        path = cache_dir() / "smplx_previews" / f"{library_id}.webp"
+        if not path.is_file():
+            def work():
+                from ..viz.smplx_skin import animated_preview_webp
+                vertices, faces, _name, fps = _source_skin(library_id)
+                data = animated_preview_webp(vertices, faces, fps=fps)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            await POOL.run(work)
+        return FileResponse(path, media_type="image/webp",
+                            headers={"cache-control": "public, max-age=31536000"})
+
     @app.get("/api/families")
     def families():
         return {"families": FAMILIES}
+
+    @app.get("/api/viewer/transport")
+    def viewer_transport():
+        return state["live"].transport_state()
+
+    @app.post("/api/viewer/transport")
+    def set_viewer_transport(
+            frame: int | None = Query(default=None, ge=0),
+            play: bool | None = Query(default=None),
+            follow: bool | None = Query(default=None),
+            speed: float | None = Query(default=None, ge=0.25, le=2.0)):
+        result = state["live"].set_transport(
+            frame=frame, play=play, follow=follow, speed=speed)
+        # Follow is a camera behaviour rather than a shared clock.  Mirror it
+        # to the source viewport only while comparison synchronization is on.
+        if follow is not None and state["sync_comparison"]:
+            state["source_live"].set_transport(follow=follow)
+        return result
+
+    @app.post("/api/viewer/clear")
+    def clear_viewer():
+        # Invalidate previews that may still be decoding in the worker. They
+        # must not repopulate the canvas after the final timeline block was
+        # removed.
+        state["viewer_revision"] += 1
+        return state["live"].clear_motion()
+
+    @app.post("/api/source/preview/library")
+    async def preview_source_library(library_id: int = Query(ge=0)):
+        lib = state["library"]
+        _require_library_id(lib, library_id)
+        def work():
+            vertices, faces, name, fps = _source_skin(library_id)
+            state["source_live"].set_smplx_skin(
+                vertices, faces, name, fps=fps)
+            if state["sync_comparison"]:
+                state["source_live"].set_transport(
+                    follow=state["live"].transport_state()["follow"])
+            return {**state["source_live"].transport_state(),
+                    "name": name, "skin": "SMPL-X neutral"}
+        return await POOL.run(work)
+
+    @app.get("/api/source/transport")
+    def source_transport():
+        return state["source_live"].transport_state()
+
+    @app.post("/api/source/transport")
+    def set_source_transport(
+            frame: int | None = Query(default=None, ge=0),
+            play: bool | None = Query(default=None),
+            speed: float | None = Query(default=None, ge=0.25, le=2.0),
+            sync: bool = Query(default=False)):
+        state["sync_comparison"] = bool(sync)
+        result = state["source_live"].set_transport(
+            frame=frame, play=play, speed=speed)
+        # Synchronized playback starts/pauses both clocks where they already
+        # are. Deliberately do not seek either side.
+        if play is not None and sync:
+            state["live"].set_transport(play=play)
+        return result
+
+    @app.post("/api/comparison/sync")
+    def set_comparison_sync(enabled: bool = Query(default=False)):
+        state["sync_comparison"] = bool(enabled)
+        target, source = state["live"], state["source_live"]
+        target.set_camera_linked(enabled, reset=False)
+        source.set_camera_linked(enabled, reset=False)
+        # Enabling synchronization adopts the main viewport's current Follow
+        # setting without changing either camera pose.  Once unlinked, leave
+        # the main setting alone and return the source to its fixed camera.
+        source.set_transport(
+            follow=target.transport_state()["follow"] if enabled else False)
+        return {"enabled": bool(enabled)}
+
+    @app.post("/api/comparison/reset-camera")
+    def reset_comparison_camera():
+        """Reset the main view and, while synchronized, the source view."""
+        state["live"].reset_camera()
+        both = bool(state["sync_comparison"])
+        if both:
+            state["source_live"].reset_camera()
+        return {"reset": "both" if both else "target"}
 
     # ------------------------------------------------------------- jobs -----
     def _submit(kind: str, request: dict, runner) -> str:
@@ -336,6 +487,46 @@ def create_app() -> FastAPI:
             tok, ep, total, rot_codes=rot_interp,
             boundary_codes=torch.stack([prev_codes[-1], next_codes[0]]))
         return generated[1:-1]
+
+    def _preview_trace(codes, target_body: str, title: str,
+                       root_t=None, fps: float = 30.0):
+        """Decode a source clip for the live viewer without creating a Motion.
+
+        Timeline scrubbing is an editor operation, not a generation request;
+        previews therefore stay in a small in-memory LRU instead of polluting
+        SQLite, Atlas memory, result files, or quality-control history.
+        """
+        from ..embodiment import registry
+        from ..engine import constraints as MP
+        from ..engine.nets.rotations import rot6d_to_matrix
+        from ..engine.trace import MotionTrace
+        from ..viz.kinematics import (balanced_root_rotations,
+                                      stabilize_trace_root_translation)
+
+        emb = registry.load(target_body)
+        rot, _ = POOL.greenwich.decode_full(codes, emb.spec, emb.dof)
+        dof_t = torch.as_tensor(emb.dof, device=POOL.device,
+                                dtype=torch.float64)
+        rest_t = torch.as_tensor(emb.rest, device=POOL.device,
+                                 dtype=torch.float64)
+        feasible, gp, q = MP.project(
+            rot6d_to_matrix(rot).double(), emb.spec, dof_t, rest=rest_t,
+            method="global", lm_iters=20)
+        root_index = int(np.where(np.asarray(emb.spec.parents) < 0)[0][0])
+        rootR = rot6d_to_matrix(
+            feasible[:, root_index:root_index + 1]).cpu().numpy()[:, 0]
+        rootR = balanced_root_rotations(rootR)
+        trace = MotionTrace(
+            q=q.detach().cpu().numpy(), rootR=rootR,
+            gp=gp.detach().cpu().numpy(),
+            stage=np.zeros(len(codes), np.int32), fps=fps, title=title,
+            target=target_body, joint_names=list(emb.spec.joint_names),
+            root_t=None if root_t is None else np.asarray(root_t, np.float64))
+        if emb.xml and Path(emb.xml).is_file():
+            trace.root_t, report = stabilize_trace_root_translation(
+                trace, emb.xml, target_body)
+            trace.contact_stabilized = bool(report.get("available", False))
+        return trace, emb
 
     def _finalize(codes, target_body, title, source, prompt=None,
                   parent=None, render=True, fps=30.0, se3=(), root_t=None,
@@ -551,10 +742,10 @@ def create_app() -> FastAPI:
         # trace + assets
         rootR = rot6d_to_matrix(
             refined[:, root_index:root_index + 1, :6]).cpu().numpy()[:, 0]
-        # world translation: DATA passthrough when the source carries a root
-        # trajectory (owner design — window's first frame = world origin);
-        # renderers fall back to contact-derived stride odometry only when
-        # root_t is absent (e.g. generated interiors with no data trajectory).
+        # Robot roots need a balance guard: the human pelvis stream can carry
+        # a persistent retargeting lean that is not a valid robot base pose.
+        from ..viz.kinematics import balanced_root_rotations
+        rootR = balanced_root_rotations(rootR)
         mid_title = title or f"{source}-{int(time.time())}"
         trace = MotionTrace(q=q.detach().cpu().numpy(), rootR=rootR,
                             gp=gp.detach().cpu().numpy(),
@@ -564,6 +755,25 @@ def create_app() -> FastAPI:
                             joint_names=list(emb.spec.joint_names),
                             root_t=None if root_t is None
                             else np.asarray(root_t, np.float64))
+        # Bake contact correction into new traces so downloaded assets, the
+        # live viewer, and MP4 export share the same target-specific world
+        # trajectory. Older traces receive the same correction at render time.
+        contact_report = {"available": False, "reason": "no target mesh"}
+        if emb.xml:
+            try:
+                from ..viz.kinematics import stabilize_trace_root_translation
+                trace.root_t, contact_report = stabilize_trace_root_translation(
+                    trace, emb.xml, target_body)
+                trace.contact_stabilized = bool(
+                    contact_report.get("available", False))
+            except Exception as exc:  # rendering remains usable without it
+                contact_report = {"available": False,
+                                  "reason": f"contact solve failed: {exc}"}
+        qc["contact_stability"] = contact_report
+        rrep["contact_stabilization"] = contact_report
+        if contact_report.get("available"):
+            release_ok = bool(release_ok and contact_report.get("passed"))
+            qc["release_passed"] = release_ok
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family or family_of(prompt or mid_title)
@@ -644,6 +854,143 @@ def create_app() -> FastAPI:
     def _require_library_id(lib, index: int):
         if index < 0 or index >= len(lib):
             raise HTTPException(422, f"library_id must be in [0, {len(lib)-1}]")
+
+    @app.post("/api/viewer/preview/library")
+    async def preview_library_on_timeline(
+            library_id: int = Query(ge=0),
+            n: int = Query(default=60, ge=1, le=1800),
+            target_body: str = Query(default="unitree_h1", min_length=1,
+                                     max_length=128)):
+        """Put one target-retargeted Library clip on the live canvas."""
+        lib = state["library"]
+        emb = _require_body(target_body)
+        _require_library_id(lib, library_id)
+        if not emb.xml or not Path(emb.xml).is_file():
+            raise HTTPException(422, "selected body has no renderable mesh")
+        key = (int(library_id), int(n), target_body)
+        revision = state["viewer_revision"]
+
+        def work():
+            cache = state["timeline_previews"]
+            if key in cache:
+                trace = cache[key]
+                cache.move_to_end(key)
+            else:
+                seg = Segment(kind="library", library_id=library_id, n=n)
+                codes, name, _fam, root = _segment_codes(
+                    seg, POOL.equator, lib, target_body)
+                trace, _ = _preview_trace(codes, target_body, name,
+                                          root_t=root)
+                cache[key] = trace
+                cache.move_to_end(key)
+                while len(cache) > 20:
+                    cache.popitem(last=False)
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, target_body)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True}
+
+        return await POOL.run(work)
+
+    @app.post("/api/viewer/preview/timeline")
+    async def preview_uncompiled_timeline(req: TimelineRequest):
+        """Build one frame-accurate editor preview without generating gaps.
+
+        Library material is decoded normally. An unconstructed bridge contains
+        no motion yet, so its entire frame budget repeats the preceding pose and
+        root position. The live viewer can consequently run on the exact same
+        global frame clock as the timeline instead of looping individual clips.
+        """
+        lib = state["library"]
+        emb = _require_body(req.target_body)
+        if not emb.xml or not Path(emb.xml).is_file():
+            raise HTTPException(422, "selected body has no renderable mesh")
+        if any(seg.kind not in ("library", "gap") for seg in req.segments):
+            raise HTTPException(
+                422, "prompt and video segments must be generated before preview")
+        for seg in req.segments:
+            if seg.kind == "library":
+                _require_library_id(lib, seg.library_id)
+        if req.segments[0].kind == "gap":
+            raise HTTPException(422, "a bridge needs a clip on its left")
+        cache_key = req.model_dump_json(exclude={"render", "se3", "title"})
+        revision = state["viewer_revision"]
+
+        def work():
+            cache = state["edit_previews"]
+            if cache_key in cache:
+                trace = cache[cache_key]
+                cache.move_to_end(cache_key)
+            else:
+                chunks, roots = [], []
+                anchor = np.zeros(3, np.float64)
+                have_roots = True
+                for seg in req.segments:
+                    if seg.kind == "gap":
+                        if not chunks:
+                            raise ValueError("a bridge needs a clip on its left")
+                        chunks.append(chunks[-1][-1:].repeat(seg.n, 1, 1))
+                        if have_roots:
+                            roots.append(np.repeat(
+                                anchor[None], seg.n, axis=0))
+                        continue
+                    codes, _name, _fam, root = _segment_codes(
+                        seg, POOL.equator, lib, req.target_body)
+                    chunks.append(codes)
+                    if root is None:
+                        have_roots = False
+                        roots.clear()
+                    elif have_roots:
+                        absolute = anchor + np.asarray(root, np.float64)
+                        roots.append(absolute)
+                        anchor = absolute[-1].copy()
+                codes = torch.cat(chunks, 0)
+                root_t = np.concatenate(roots, 0) if have_roots else None
+                trace, _ = _preview_trace(
+                    codes, req.target_body, req.title or "Timeline preview",
+                    root_t=root_t, fps=req.fps)
+                cache[cache_key] = trace
+                cache.move_to_end(cache_key)
+                while len(cache) > 8:
+                    cache.popitem(last=False)
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, req.target_body)
+            state["live"].set_transport(frame=0, play=False)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True,
+                    "frozen_bridges": True}
+
+        return await POOL.run(work)
+
+    @app.post("/api/viewer/preview/motion/{motion_id}")
+    async def preview_motion_on_timeline(motion_id: int):
+        """Recall a generated Bridge (or any durable motion) for scrubbing."""
+        from ..embodiment import registry
+        from ..engine.trace import MotionTrace
+        with session() as s:
+            motion = s.get(Motion, motion_id)
+            if not motion:
+                raise HTTPException(404, "no such motion")
+            trace_path = Path(motion.trace_path)
+        if not trace_path.is_file():
+            raise HTTPException(404, "motion trace is missing")
+
+        revision = state["viewer_revision"]
+
+        def work():
+            trace = MotionTrace.load(trace_path)
+            emb = registry.load(trace.target)
+            if not emb.xml or not Path(emb.xml).is_file():
+                raise ValueError("motion body has no renderable mesh")
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, trace.target)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True}
+
+        return await POOL.run(work)
 
     @app.post("/api/jobs/play", status_code=202)
     async def play(req: PlayRequest):
@@ -1009,6 +1356,11 @@ def create_app() -> FastAPI:
         from ..config import CONFIG
         return await _viewer_proxy(CONFIG.viewer_ports[1], path)
 
+    @app.get("/source-viewer/{path:path}")
+    async def source_viewer_proxy(path: str):
+        from ..config import CONFIG
+        return await _viewer_proxy(CONFIG.viewer_ports[2], path)
+
     async def _viser_ws_proxy(ws: WebSocket, port: int):
         import websockets
 
@@ -1065,6 +1417,11 @@ def create_app() -> FastAPI:
     async def body_viser_ws(ws: WebSocket):
         from ..config import CONFIG
         await _viser_ws_proxy(ws, CONFIG.viewer_ports[1])
+
+    @app.websocket("/source-viser-ws")
+    async def source_viser_ws(ws: WebSocket):
+        from ..config import CONFIG
+        await _viser_ws_proxy(ws, CONFIG.viewer_ports[2])
 
     if FRONTEND.exists():
         app.mount("/", StaticFiles(directory=FRONTEND, html=True),
