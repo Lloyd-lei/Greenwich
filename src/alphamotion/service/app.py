@@ -50,12 +50,12 @@ def create_app() -> FastAPI:
     async def _startup():
         from ..atlas.library import load_default as load_library
         from ..config import CONFIG
-        from ..embodiment import registry
-        from ..engine.trace import MotionTrace
         from ..viz.live import LiveViewer
         state["warm"] = POOL.warm()
         state["library"] = load_library()
-        state["live"] = LiveViewer(CONFIG.viewer_ports[0])
+        # An empty editor must also have an idle player. Motions are started
+        # explicitly by the Studio transport after a timeline is populated.
+        state["live"] = LiveViewer(CONFIG.viewer_ports[0], autoplay=False)
         state["body_live"] = LiveViewer(CONFIG.viewer_ports[1])
         def source_finished():
             if state.get("sync_comparison"):
@@ -78,8 +78,6 @@ def create_app() -> FastAPI:
                 job.status = "failed"
                 job.error = "service restarted before this job completed"
                 job.finished_at = dt.datetime.utcnow()
-            recent = s.query(Motion).order_by(
-                Motion.id.desc()).limit(32).all()
             candidates = s.query(Motion).order_by(Motion.id.desc()).limit(
                 max(dynamic_capacity * 4, dynamic_capacity)).all()
             motions = [m for m in candidates
@@ -95,25 +93,6 @@ def create_app() -> FastAPI:
                 tokens = np.asarray(motion.tokens or [], np.int32)
                 if tokens.shape == (32,):
                     atlas.add(tokens, motion.title, family_id(motion.family))
-
-        # Restore the most recent renderable result into the persistent Viser
-        # canvas. A restart should not turn a working studio into a blank page.
-        for motion in recent:
-            try:
-                if not release_passed(motion.gate_passed, motion.qc):
-                    continue
-                trace_path = Path(motion.trace_path)
-                if not trace_path.is_file():
-                    continue
-                trace = MotionTrace.load(trace_path)
-                emb = registry.load(trace.target)
-                if not emb.xml or not Path(emb.xml).is_file():
-                    continue
-                state["live"].set_trace(trace, emb.xml, trace.target)
-                state["restored_motion"] = motion.id
-                break
-            except Exception:  # noqa: BLE001 - skip corrupt legacy artifacts
-                continue
 
     # ------------------------------------------------------------- meta -----
     @app.get("/api/health")
