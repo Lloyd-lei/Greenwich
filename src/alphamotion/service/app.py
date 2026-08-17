@@ -35,6 +35,7 @@ from .pool import POOL
 from .schemas import JumpRequest, PlayRequest, Segment, TimelineRequest
 
 FRONTEND = Path(__file__).parent.parent / "assets" / "frontend"
+MODEL_FRAME_BATCH = 256
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AlphaMotion", version="0.1.0")
@@ -43,8 +44,33 @@ def create_app() -> FastAPI:
                    "timeline_previews": OrderedDict(),
                    "edit_previews": OrderedDict(),
                    "source_skins": OrderedDict(),
+                   "source_codes": OrderedDict(),
                    "sync_comparison": False,
                    "viewer_revision": 0}
+
+    def _decode_full_batched(codes, spec, dof):
+        """Decode long clips without materialising huge model activations."""
+        rot, pos = [], []
+        for chunk in codes.split(MODEL_FRAME_BATCH):
+            chunk_rot, chunk_pos = POOL.greenwich.decode_full(
+                chunk, spec, dof)
+            rot.append(chunk_rot.detach())
+            pos.append(chunk_pos.detach())
+        return torch.cat(rot), torch.cat(pos)
+
+    def _project_batched(global_rotations, spec, dof_t, rest_t,
+                         method="global", lm_iters=20):
+        """Project independent frames in bounded GPU batches."""
+        from ..engine import constraints as MP
+        feasible, positions, angles = [], [], []
+        for chunk in global_rotations.split(MODEL_FRAME_BATCH):
+            f, p, q = MP.project(
+                chunk, spec, dof_t, rest=rest_t,
+                method=method, lm_iters=lm_iters)
+            feasible.append(f.detach())
+            positions.append(p.detach())
+            angles.append(q.detach())
+        return torch.cat(feasible), torch.cat(positions), torch.cat(angles)
 
     @app.on_event("startup")
     async def _startup():
@@ -181,9 +207,15 @@ def create_app() -> FastAPI:
     @app.get("/api/library")
     def library(q: str = Query(default="", max_length=200),
                 family: str = Query(default="", max_length=32),
+                dataset: str = Query(default="", max_length=64),
                 offset: int = Query(default=0, ge=0),
                 limit: int = Query(default=24, ge=1, le=100)):
-        return state["library"].search(q, family, offset, limit)
+        return state["library"].search(
+            q=q, family=family, dataset=dataset, offset=offset, limit=limit)
+
+    @app.get("/api/library-datasets")
+    def library_datasets():
+        return {"datasets": state["library"].dataset_summary()}
 
     @app.get("/api/library/{library_id}/preview")
     async def library_preview(library_id: int):
@@ -193,8 +225,12 @@ def create_app() -> FastAPI:
             raise HTTPException(404, "no such library clip")
         return {"id": int(library_id), "name": lib.names[library_id],
                 "family": lib.families[library_id],
-                "frames": int(lib.window), "fps": 30.0,
-                "skin": "SMPL-X neutral",
+                "dataset": lib.datasets[library_id],
+                "source": lib.sources[library_id],
+                "frames": lib.frames(library_id), "fps": 30.0,
+                "skin": ("neutral SMPL-X · exact source parameters"
+                         if lib.source_motion(library_id) is not None else
+                         "neutral SMPL-X · decoded 60-frame window"),
                 "url": f"/api/library/{library_id}/preview.webp"}
 
     def _source_skin(library_id: int):
@@ -205,16 +241,30 @@ def create_app() -> FastAPI:
             return cache[library_id]
         from ..viz.smplx_skin import skin_global_rot6d
         spec, dof, _rest = POOL.human
-        codes = torch.from_numpy(
-            lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
-        rot = POOL.greenwich.decode(codes, spec, dof)
-        root = lib.root_delta(library_id, "human_smpl")
+        motion = lib.source_motion(library_id)
+        if motion is None:
+            codes = torch.from_numpy(
+                lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
+            rot = POOL.greenwich.decode(codes, spec, dof)
+            root = lib.root_delta(library_id, "human_smpl")
+            hands = betas = None
+            source_kind = "decoded-window"
+        else:
+            from ..engine.spatial import build_global
+            rot, _pos, _reach = build_global(
+                torch.from_numpy(motion["local_rot6d"]), spec, "cpu")
+            root = motion["root_cm"]
+            hands, betas = motion["hand_pose"], motion["betas"]
+            source_kind = "exact-source"
         vertices, faces = skin_global_rot6d(
-            rot.cpu().numpy(), spec.parents, root_cm=root, device=POOL.device)
-        value = (vertices, faces, lib.names[library_id], 30.0)
+            rot.cpu().numpy(), spec.parents, root_cm=root,
+            hand_pose=hands, betas=betas, device=POOL.device)
+        value = (vertices, faces, lib.names[library_id], 30.0, source_kind)
         cache[library_id] = value
         cache.move_to_end(library_id)
-        while len(cache) > 4:
+        # Long-form clips can occupy hundreds of MB even in half precision.
+        # Keep only the active source instead of accumulating stale previews.
+        while len(cache) > 1:
             cache.popitem(last=False)
         return value
 
@@ -225,11 +275,12 @@ def create_app() -> FastAPI:
         if library_id < 0 or library_id >= len(lib):
             raise HTTPException(404, "no such library clip")
         from ..paths import cache_dir
-        path = cache_dir() / "smplx_previews" / f"{library_id}.webp"
+        # v3 includes full source duration, source betas and hand articulation.
+        path = cache_dir() / "smplx_previews" / f"v3-{library_id}.webp"
         if not path.is_file():
             def work():
                 from ..viz.smplx_skin import animated_preview_webp
-                vertices, faces, _name, fps = _source_skin(library_id)
+                vertices, faces, _name, fps, _kind = _source_skin(library_id)
                 data = animated_preview_webp(vertices, faces, fps=fps)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
@@ -272,14 +323,15 @@ def create_app() -> FastAPI:
         lib = state["library"]
         _require_library_id(lib, library_id)
         def work():
-            vertices, faces, name, fps = _source_skin(library_id)
+            vertices, faces, name, fps, kind = _source_skin(library_id)
             state["source_live"].set_smplx_skin(
                 vertices, faces, name, fps=fps)
             if state["sync_comparison"]:
                 state["source_live"].set_transport(
                     follow=state["live"].transport_state()["follow"])
             return {**state["source_live"].transport_state(),
-                    "name": name, "skin": "SMPL-X neutral"}
+                    "name": name, "skin": "SMPL-X neutral",
+                    "source_kind": kind}
         return await POOL.run(work)
 
     @app.get("/api/source/transport")
@@ -404,6 +456,30 @@ def create_app() -> FastAPI:
                 "bytes": total}
 
     # ---------------------------------------------------------- pipeline ----
+    def _library_playback_codes(library_id: int):
+        """Exact full imported source, or the native curated 60f window."""
+        lib = state["library"]
+        motion = lib.source_motion(library_id)
+        if motion is None:
+            return torch.from_numpy(
+                lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
+        cache = state["source_codes"]
+        if library_id in cache:
+            cache.move_to_end(library_id)
+            return cache[library_id]
+        spec, dof, _rest = POOL.human
+        local = torch.from_numpy(motion["local_rot6d"]).to(POOL.device)
+        pose9, _ = POOL.greenwich.pose9(local, spec, is_global=False)
+        codes = torch.cat([
+            POOL.greenwich.encode(chunk, spec, dof).detach()
+            for chunk in pose9.split(MODEL_FRAME_BATCH)
+        ])
+        cache[library_id] = codes
+        cache.move_to_end(library_id)
+        while len(cache) > 3:
+            cache.popitem(last=False)
+        return codes
+
     def _segment_codes(seg: Segment, eq, lib, target_body: str | None = None):
         """One library segment -> codes, name, family, and 3-D root path.
 
@@ -414,8 +490,8 @@ def create_app() -> FastAPI:
         origin), never inferred."""
         if seg.kind == "library":
             tok, bounds, name, fam = lib.entry(seg.library_id)
-            raw = torch.from_numpy(
-                lib.raw_codes(seg.library_id).astype(np.int64))
+            raw = _library_playback_codes(seg.library_id)
+            base_n = seg.source_frames or seg.n
             root = None
             if target_body:
                 from ..embodiment import registry
@@ -426,23 +502,47 @@ def create_app() -> FastAPI:
                     rest_positions(target.spec), axis=-1).max())
                 human_reach = float(np.linalg.norm(
                     rest_positions(hspec), axis=-1).max())
-                root = lib.root_delta(seg.library_id, target_body,
-                                      body_reach, human_reach)
-            if root is not None and seg.n != len(root):
+                root = lib.playback_root_delta(
+                    seg.library_id, target_body, body_reach, human_reach)
+            if root is not None and base_n != len(root):
                 from ..engine.timeline import resample_continuous
-                root = resample_continuous(root, seg.n)
-            if seg.n == raw.shape[0] and not seg.pins:
-                return raw.to(eq.device), name, fam, root
-            from ..engine.timeline import interpolate_lattice
-            tokens = torch.from_numpy(tok).long().to(eq.device)
-            for slot, val in (seg.pins or {}).items():
-                tokens[int(slot)] = int(val)
-            ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
-            rot_codes = interpolate_lattice(raw[:, 128:], seg.n)
-            boundary = torch.stack([raw[0], raw[-1]])
-            codes = eq.detokenize(tokens, ep, seg.n,
-                                  boundary_codes=boundary,
-                                  rot_codes=rot_codes)
+                root = resample_continuous(root, base_n)
+            if base_n == raw.shape[0] and not seg.pins:
+                codes = raw.to(eq.device)
+            else:
+                from ..engine.timeline import interpolate_lattice
+                tokens = torch.from_numpy(tok).long().to(eq.device)
+                for slot, val in (seg.pins or {}).items():
+                    tokens[int(slot)] = int(val)
+                ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
+                rot_codes = interpolate_lattice(raw[:, 128:], base_n)
+                boundary = torch.stack([raw[0], raw[-1]])
+                codes = eq.detokenize(tokens, ep, base_n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+
+            # Non-destructive timeline split. Generate the parent material once,
+            # then take the exact requested interval. If the user subsequently
+            # changes this half's time budget, tokenize and retime only the cut
+            # material instead of replaying the complete Library asset.
+            if seg.source_frames is not None:
+                start = seg.source_start
+                end = seg.source_end or seg.source_frames
+                codes = codes[start:end]
+                if root is not None:
+                    root = np.asarray(root)[start:end]
+            if seg.n != len(codes):
+                from ..engine.timeline import (interpolate_lattice,
+                                               resample_continuous)
+                source = codes
+                tokens, ep = eq.tokenize(source)
+                rot_codes = interpolate_lattice(source[:, 128:], seg.n)
+                boundary = torch.stack([source[0], source[-1]])
+                codes = eq.detokenize(tokens, ep, seg.n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+                if root is not None:
+                    root = resample_continuous(root, seg.n)
             return codes, name, fam, root
         raise ValueError(f"segment kind '{seg.kind}' not handled here")
 
@@ -479,17 +579,16 @@ def create_app() -> FastAPI:
         from ..engine import constraints as MP
         from ..engine.nets.rotations import rot6d_to_matrix
         from ..engine.trace import MotionTrace
-        from ..viz.kinematics import (balanced_root_rotations,
-                                      stabilize_trace_root_translation)
+        from ..viz.kinematics import balanced_root_rotations
 
         emb = registry.load(target_body)
-        rot, _ = POOL.greenwich.decode_full(codes, emb.spec, emb.dof)
+        rot, _ = _decode_full_batched(codes, emb.spec, emb.dof)
         dof_t = torch.as_tensor(emb.dof, device=POOL.device,
                                 dtype=torch.float64)
         rest_t = torch.as_tensor(emb.rest, device=POOL.device,
                                  dtype=torch.float64)
-        feasible, gp, q = MP.project(
-            rot6d_to_matrix(rot).double(), emb.spec, dof_t, rest=rest_t,
+        feasible, gp, q = _project_batched(
+            rot6d_to_matrix(rot).double(), emb.spec, dof_t, rest_t,
             method="global", lm_iters=20)
         root_index = int(np.where(np.asarray(emb.spec.parents) < 0)[0][0])
         rootR = rot6d_to_matrix(
@@ -501,10 +600,6 @@ def create_app() -> FastAPI:
             stage=np.zeros(len(codes), np.int32), fps=fps, title=title,
             target=target_body, joint_names=list(emb.spec.joint_names),
             root_t=None if root_t is None else np.asarray(root_t, np.float64))
-        if emb.xml and Path(emb.xml).is_file():
-            trace.root_t, report = stabilize_trace_root_translation(
-                trace, emb.xml, target_body)
-            trace.contact_stabilized = bool(report.get("available", False))
         return trace, emb
 
     def _finalize(codes, target_body, title, source, prompt=None,
@@ -530,8 +625,8 @@ def create_app() -> FastAPI:
             root_t = np.asarray(root_t, np.float64).copy()
             if root_t.shape != (len(codes), 3):
                 raise ValueError("root_t must have shape [frames, 3]")
-        rot, _pos_n = gw.decode_full(codes, emb.spec, emb.dof)
-        rot_h = gw.decode(codes, hspec, hdof)
+        rot, _pos_n = _decode_full_batched(codes, emb.spec, emb.dof)
+        rot_h, _ = _decode_full_batched(codes, hspec, hdof)
         # Whole-chain global LM maps decoded rotations onto the target body's
         # feasible joint manifold. The spatial position head is root-relative;
         # it remains available for diagnostics but is not a world-root head.
@@ -540,8 +635,8 @@ def create_app() -> FastAPI:
                                 dtype=torch.float64)
         rest_t = torch.as_tensor(emb.rest, device=POOL.device,
                                  dtype=torch.float64)
-        feasible, gp, q = MP.project(Rg, emb.spec, dof_t, rest=rest_t,
-                                     method="global", lm_iters=20)
+        feasible, gp, q = _project_batched(
+            Rg, emb.spec, dof_t, rest_t, method="global", lm_iters=20)
         q = q.detach()
         gp = gp.detach()
         refined = feasible.float().detach()
@@ -559,9 +654,9 @@ def create_app() -> FastAPI:
             gp = gp.detach()
         repaired, hold_report = repair_generated_holds(refined, stage)
         if hold_report["repaired_frames"]:
-            feasible, gp, q = MP.project(
-                rot6d_to_matrix(repaired).double(), emb.spec, dof_t,
-                rest=rest_t, method="global", lm_iters=20)
+            feasible, gp, q = _project_batched(
+                rot6d_to_matrix(repaired).double(), emb.spec, dof_t, rest_t,
+                method="global", lm_iters=20)
             q = q.detach()
             gp = gp.detach()
             refined = feasible.float().detach()
@@ -734,25 +829,6 @@ def create_app() -> FastAPI:
                             joint_names=list(emb.spec.joint_names),
                             root_t=None if root_t is None
                             else np.asarray(root_t, np.float64))
-        # Bake contact correction into new traces so downloaded assets, the
-        # live viewer, and MP4 export share the same target-specific world
-        # trajectory. Older traces receive the same correction at render time.
-        contact_report = {"available": False, "reason": "no target mesh"}
-        if emb.xml:
-            try:
-                from ..viz.kinematics import stabilize_trace_root_translation
-                trace.root_t, contact_report = stabilize_trace_root_translation(
-                    trace, emb.xml, target_body)
-                trace.contact_stabilized = bool(
-                    contact_report.get("available", False))
-            except Exception as exc:  # rendering remains usable without it
-                contact_report = {"available": False,
-                                  "reason": f"contact solve failed: {exc}"}
-        qc["contact_stability"] = contact_report
-        rrep["contact_stabilization"] = contact_report
-        if contact_report.get("available"):
-            release_ok = bool(release_ok and contact_report.get("passed"))
-            qc["release_passed"] = release_ok
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family or family_of(prompt or mid_title)
@@ -837,7 +913,10 @@ def create_app() -> FastAPI:
     @app.post("/api/viewer/preview/library")
     async def preview_library_on_timeline(
             library_id: int = Query(ge=0),
-            n: int = Query(default=60, ge=1, le=1800),
+            n: int = Query(default=60, ge=1, le=10_000),
+            source_frames: int | None = Query(default=None, ge=1, le=10_000),
+            source_start: int = Query(default=0, ge=0),
+            source_end: int | None = Query(default=None, ge=1, le=10_000),
             target_body: str = Query(default="unitree_h1", min_length=1,
                                      max_length=128)):
         """Put one target-retargeted Library clip on the live canvas."""
@@ -846,7 +925,8 @@ def create_app() -> FastAPI:
         _require_library_id(lib, library_id)
         if not emb.xml or not Path(emb.xml).is_file():
             raise HTTPException(422, "selected body has no renderable mesh")
-        key = (int(library_id), int(n), target_body)
+        key = (int(library_id), int(n), source_frames, int(source_start),
+               source_end, target_body)
         revision = state["viewer_revision"]
 
         def work():
@@ -855,7 +935,10 @@ def create_app() -> FastAPI:
                 trace = cache[key]
                 cache.move_to_end(key)
             else:
-                seg = Segment(kind="library", library_id=library_id, n=n)
+                seg = Segment(kind="library", library_id=library_id, n=n,
+                              source_frames=source_frames,
+                              source_start=source_start,
+                              source_end=source_end)
                 codes, name, _fam, root = _segment_codes(
                     seg, POOL.equator, lib, target_body)
                 trace, _ = _preview_trace(codes, target_body, name,
@@ -981,7 +1064,7 @@ def create_app() -> FastAPI:
             def work():
                 eq = POOL.equator
                 seg = Segment(kind="library", library_id=req.library_id,
-                              n=req.n or lib.window)
+                              n=req.n or lib.frames(req.library_id))
                 codes, name, fam, root = _segment_codes(seg, eq, lib,
                                                         req.target_body)
                 return _finalize(codes, req.target_body, name, "library",

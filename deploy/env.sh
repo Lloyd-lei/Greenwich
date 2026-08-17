@@ -7,6 +7,7 @@ fi
 export GREENWICH_DEPLOY_ROOT='/media/sajio/New Volume/CodexDeployments/Greenwich'
 export ALPHAMOTION_CACHE="$GREENWICH_DEPLOY_ROOT/cache/alphamotion"
 export ALPHAMOTION_DATA="$GREENWICH_DEPLOY_ROOT/data/alphamotion"
+export ALPHAMOTION_IMPORTED_LIBRARY="$ALPHAMOTION_DATA/imported_smpl"
 export ALPHAMOTION_GENMO_PYTHON="$GREENWICH_DEPLOY_ROOT/envs/genmo/bin/python"
 export ALPHAMOTION_GENMO_REPO="$GREENWICH_DEPLOY_ROOT/sources/GENMO"
 export HF_HOME="$GREENWICH_DEPLOY_ROOT/cache/huggingface"

@@ -29,10 +29,9 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
     from scipy.spatial.transform import Rotation
     from ..engine.descriptor import build_from_mjcf
     from ..engine.trace import MotionTrace
-    from .kinematics import (apply_ground_safe_pose,
-                             contact_stabilized_root_offsets,
-                             first_frame_ground_height, free_root_address,
-                             joint_qpos_map, source_joint_map,
+    from .kinematics import (apply_ground_safe_pose, first_frame_ground_height,
+                             free_root_address, joint_qpos_map,
+                             root_world_offsets, source_joint_map,
                              visual_mesh_geom_ids)
     tr = MotionTrace.load(trace_path)
     model = mj.MjModel.from_xml_path(xml)
@@ -47,8 +46,19 @@ def motion_viewer(trace_path: str, xml: str, body: str, port: int = 7871):
     gids = visual_mesh_geom_ids(model)
     ground_z = first_frame_ground_height(
         model, data, tr, spec, tab, src_of, root_adr)
-    offsets, _contact_report = contact_stabilized_root_offsets(
-        model, data, tr, spec, tab, src_of, root_adr, ground_z)
+    offsets = root_world_offsets(getattr(tr, "root_t", None), tr.frames)
+    if getattr(tr, "root_t", None) is None and root_adr >= 0:
+        from ..engine.odometry import foot_bodies, stance_offsets
+        feet = foot_bodies(model)
+        foot_world = np.zeros((tr.frames, len(feet), 3))
+        for t in range(tr.frames):
+            apply_ground_safe_pose(
+                model, data, tr, spec, tab, src_of, root_adr, t,
+                (0.0, 0.0, ground_z))
+            for i, bid in enumerate(feet):
+                foot_world[t, i] = data.xpos[bid]
+        if len(feet):
+            offsets[:, :2] = stance_offsets(foot_world)
 
     T = tr.frames
     pos = np.zeros((T, len(gids), 3), np.float32)

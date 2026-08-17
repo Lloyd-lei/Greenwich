@@ -33,11 +33,12 @@ def _model(device: str):
     import smplx
     body = smplx.create(
         str(model_path()), model_type="smplx", gender="neutral",
-        num_betas=10, num_pca_comps=12, flat_hand_mean=True)
+        num_betas=10, use_pca=False, flat_hand_mean=True)
     return body.to(device).eval()
 
 
-def skin_global_rot6d(rot6d, parents, root_cm=None, device="cpu"):
+def skin_global_rot6d(rot6d, parents, root_cm=None, hand_pose=None,
+                      betas=None, device="cpu", batch_size: int = 128):
     """Skin global 22-joint SMPL rotations into a neutral SMPL-X surface.
 
     The stored motion convention is centimetres with Y up. Viser uses metres
@@ -63,42 +64,70 @@ def skin_global_rot6d(rot6d, parents, root_cm=None, device="cpu"):
         if value.shape != root.shape:
             raise ValueError(f"root trajectory must be {root.shape}, got {value.shape}")
         root = (value - value[:1]) / 100.0
+    hands = np.zeros((len(global_R), 90), np.float32)
+    if hand_pose is not None:
+        value = np.asarray(hand_pose, np.float32)
+        if value.shape != hands.shape:
+            raise ValueError(f"hand pose must be {hands.shape}, got {value.shape}")
+        hands = value
+    shape = np.zeros(10, np.float32)
+    if betas is not None:
+        value = np.asarray(betas, np.float32).reshape(-1)
+        shape[:min(10, len(value))] = value[:10]
 
     with _MODEL_LOCK, torch.inference_mode():
         body = _model(device)
         dtype = body.shapedirs.dtype
-        kwargs = {
-            "global_orient": torch.as_tensor(
-                aa[:, 0], device=device, dtype=dtype),
-            "body_pose": torch.as_tensor(
-                aa[:, 1:].reshape(len(aa), -1), device=device, dtype=dtype),
-            "transl": torch.as_tensor(root, device=device, dtype=dtype),
-            "betas": torch.zeros((len(aa), 10), device=device, dtype=dtype),
-            "left_hand_pose": torch.zeros(
-                (len(aa), body.num_pca_comps), device=device, dtype=dtype),
-            "right_hand_pose": torch.zeros(
-                (len(aa), body.num_pca_comps), device=device, dtype=dtype),
-            "jaw_pose": torch.zeros((len(aa), 3), device=device, dtype=dtype),
-            "leye_pose": torch.zeros((len(aa), 3), device=device, dtype=dtype),
-            "reye_pose": torch.zeros((len(aa), 3), device=device, dtype=dtype),
-            "expression": torch.zeros(
-                (len(aa), body.num_expression_coeffs),
-                device=device, dtype=dtype),
-        }
-        vertices = body(**kwargs).vertices.detach().cpu().numpy()
+        vertices = None
+        floor_z = None
+        batch_size = max(1, int(batch_size))
+        for start in range(0, len(aa), batch_size):
+            stop = min(start + batch_size, len(aa))
+            count = stop - start
+            kwargs = {
+                "global_orient": torch.as_tensor(
+                    aa[start:stop, 0], device=device, dtype=dtype),
+                "body_pose": torch.as_tensor(
+                    aa[start:stop, 1:].reshape(count, -1),
+                    device=device, dtype=dtype),
+                "transl": torch.as_tensor(
+                    root[start:stop], device=device, dtype=dtype),
+                "betas": torch.as_tensor(
+                    np.repeat(shape[None], count, axis=0),
+                    device=device, dtype=dtype),
+                "left_hand_pose": torch.as_tensor(
+                    hands[start:stop, :45], device=device, dtype=dtype),
+                "right_hand_pose": torch.as_tensor(
+                    hands[start:stop, 45:], device=device, dtype=dtype),
+                "jaw_pose": torch.zeros((count, 3), device=device, dtype=dtype),
+                "leye_pose": torch.zeros((count, 3), device=device, dtype=dtype),
+                "reye_pose": torch.zeros((count, 3), device=device, dtype=dtype),
+                "expression": torch.zeros(
+                    (count, body.num_expression_coeffs),
+                    device=device, dtype=dtype),
+            }
+            chunk = body(**kwargs).vertices.detach().cpu().numpy()
+            chunk = chunk @ YUP_TO_ZUP
+            if floor_z is None:
+                floor_z = float(chunk[0, :, 2].min())
+                # A long source clip can contain >8k frames. Store it compactly
+                # and expand only the visible frame in LiveViewer.
+                vertices = np.empty(
+                    (len(aa), chunk.shape[1], 3), dtype=np.float16)
+            chunk[..., 2] -= floor_z
+            vertices[start:stop] = chunk.astype(np.float16)
         faces = np.asarray(body.faces, np.uint32)
-    vertices = (vertices @ YUP_TO_ZUP).astype(np.float32, copy=False)
-    vertices[..., 2] -= float(vertices[0, :, 2].min())
     return vertices, faces
 
 
 def animated_preview_webp(vertices: np.ndarray, faces: np.ndarray,
                           fps: float = 30.0, max_frames: int = 30) -> bytes:
     """Render a fixed-camera, full-motion animated WebP from a skinned mesh."""
-    vertices = np.asarray(vertices, np.float32)
     sample = np.linspace(0, len(vertices) - 1,
                          min(max_frames, len(vertices))).round().astype(int)
-    shown = vertices[sample]
+    # Cast only sampled frames; casting the entire long clip would briefly
+    # double resident memory and defeat compact storage.
+    shown = np.asarray(vertices[sample], np.float32)
     lo, hi = shown.min(axis=(0, 1)), shown.max(axis=(0, 1))
     center = (lo + hi) * 0.5
     radius = max(float(np.linalg.norm(hi - lo)), 1e-3)

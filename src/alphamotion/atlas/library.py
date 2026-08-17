@@ -11,6 +11,8 @@ stream the decode is exact).
 from __future__ import annotations
 
 import json
+import os
+from bisect import bisect_right
 from pathlib import Path
 
 import numpy as np
@@ -26,6 +28,20 @@ class Library:
         self.bounds = d["bounds"]
         meta = json.loads((npz_path.parent / "library_meta.json").read_text())
         self.names = meta["clips"]
+        self.datasets = meta.get("datasets", ["current"] * len(self.names))
+        self.sources = meta.get("sources", ["Curated 4096"] * len(self.names))
+        self.source_frames = meta.get(
+            "source_frames", [meta.get("window", 60)] * len(self.names))
+        self.source_models = meta.get("source_models", [None] * len(self.names))
+        self.source_genders = meta.get(
+            "source_genders", ["neutral"] * len(self.names))
+        self._vertical_ranges = meta.get("vertical_ranges_cm")
+        self._path_lengths = meta.get("path_lengths_m")
+        if len(self.datasets) != len(self.names) or len(self.sources) != len(self.names):
+            raise ValueError("library dataset/source metadata length mismatch")
+        if any(len(values) != len(self.names) for values in (
+                self.source_frames, self.source_models, self.source_genders)):
+            raise ValueError("library source-motion metadata length mismatch")
         # Old library builds used an unbounded ``hop`` regex and silently
         # classified names such as ``knife_chop`` as jumps. Names are the
         # durable source of truth, so repair labels at load time as well as in
@@ -39,6 +55,11 @@ class Library:
         root_npy = npz_path.parent / "library_root.npy"
         self._root = np.load(root_npy, mmap_mode="r") \
             if root_npy.exists() else None
+        source_rot_npy = npz_path.parent / "library_source_rot6d.npy"
+        self._source_rot = np.load(source_rot_npy, mmap_mode="r") \
+            if source_rot_npy.exists() else None
+        source_dir = npz_path.parent / "source_clips"
+        self._source_dir = source_dir if source_dir.is_dir() else None
         rm = npz_path.parent / "library_root_meta.json"
         self._root_bodies = json.loads(rm.read_text())["bodies"] \
             if rm.exists() else []
@@ -62,6 +83,47 @@ class Library:
         out[..., 1::2] = (pk >> 4) & 0x0F
         return out
 
+    def source_local_rot6d(self, i: int) -> np.ndarray | None:
+        """Exact continuous SMPL local rotations for imported source clips.
+
+        Release-era curated shards predate this sidecar and return ``None``;
+        callers may then fall back to the codec. Imported shards must use this
+        data for any UI labelled "Original".
+        """
+        motion = self.source_motion(i)
+        return None if motion is None else motion["local_rot6d"]
+
+    def source_motion(self, i: int) -> dict | None:
+        """Full exact source parameters, or ``None`` for legacy windows."""
+        i = int(i)
+        if self._source_dir is not None:
+            path = self._source_dir / f"{i:06d}.npz"
+            if not path.is_file():
+                raise RuntimeError(f"source sidecar missing: {path}")
+            with np.load(path, allow_pickle=False) as data:
+                gender = int(np.asarray(data["gender"]).reshape(()))
+                family = int(np.asarray(data["model_family"]).reshape(()))
+                return {
+                    "local_rot6d": np.asarray(data["local_rot6d"], np.float32),
+                    "root_cm": np.asarray(data["root_cm"], np.float32),
+                    "hand_pose": np.asarray(data["hand_pose"], np.float32),
+                    "betas": np.asarray(data["betas"], np.float32),
+                    "gender": ("neutral", "male", "female")[gender],
+                    "model_family": ("smpl", "smplh")[family],
+                    "fps": 30.0,
+                }
+        if self._source_rot is not None:
+            local = np.asarray(self._source_rot[i], np.float32)
+            return {"local_rot6d": local,
+                    "root_cm": self.root_delta(i, "human_smpl"),
+                    "hand_pose": np.zeros((len(local), 90), np.float32),
+                    "betas": np.zeros(10, np.float32), "gender": "neutral",
+                    "model_family": "smplh", "fps": 30.0}
+        return None
+
+    def frames(self, i: int) -> int:
+        return int(self.source_frames[int(i)])
+
     def root_delta(self, i: int, body: str,
                    body_reach: float | None = None,
                    human_reach: float | None = None):
@@ -80,11 +142,25 @@ class Library:
             if body_reach and human_reach else 1.0
         return hu * s
 
+    def playback_root_delta(self, i: int, body: str,
+                            body_reach: float | None = None,
+                            human_reach: float | None = None):
+        """Full source root for imported clips; legacy window otherwise."""
+        motion = self.source_motion(i)
+        if motion is None:
+            return self.root_delta(i, body, body_reach, human_reach)
+        root = np.asarray(motion["root_cm"], np.float64)
+        scale = (body_reach / human_reach) \
+            if body_reach and human_reach else 1.0
+        return root * scale
+
     def search(self, q: str = "", family: str = "", offset: int = 0,
-               limit: int = 24) -> dict:
+               limit: int = 24, dataset: str = "") -> dict:
         rows = []
         for i in range(len(self.tokens)):
             if family and self.families[i] != family:
+                continue
+            if dataset and self.datasets[i] != dataset:
                 continue
             if q and q.lower() not in self.names[i].lower():
                 continue
@@ -98,11 +174,23 @@ class Library:
         page = rows[offset:offset + limit]
         return {"total": len(rows), "items": [
             {"id": int(i), "name": self.names[i], "family": self.families[i],
+             "dataset": self.datasets[i], "source": self.sources[i],
+             "frames": self.frames(i),
              **self.motion_metrics(i)}
             for i in page]}
 
+    def dataset_summary(self) -> list[dict]:
+        values = []
+        for key in dict.fromkeys(self.datasets):
+            values.append({"id": key, "label": _dataset_label(key),
+                           "count": self.datasets.count(key)})
+        return values
+
     def motion_metrics(self, i: int) -> dict:
         """Cheap source-trajectory diagnostics for library selection."""
+        if self._vertical_ranges is not None and self._path_lengths is not None:
+            return {"vertical_range_cm": float(self._vertical_ranges[int(i)]),
+                    "path_m": float(self._path_lengths[int(i)])}
         if self._root is None or "human_smpl" not in self._root_bodies:
             return {"vertical_range_cm": None, "path_m": None}
         root = np.asarray(
@@ -148,4 +236,134 @@ class Library:
 
 def load_default() -> Library:
     from ..weights import resolve
-    return Library(resolve("library") / "library.npz")
+    libraries: list[Library] = [Library(resolve("library") / "library.npz")]
+    imported = os.environ.get("ALPHAMOTION_IMPORTED_LIBRARY", "").strip()
+    if imported:
+        root = Path(imported)
+        paths = ([root / "library.npz"] if (root / "library.npz").is_file()
+                 else sorted(root.glob("*/library.npz")))
+        libraries.extend(Library(path) for path in paths)
+    return libraries[0] if len(libraries) == 1 else CompositeLibrary(libraries)
+
+
+def _dataset_label(key: str) -> str:
+    return {"current": "Current curated", "imported_smpl": "Imported SMPL"}.get(
+        key, key.replace("_", " ").title())
+
+
+class CompositeLibrary:
+    """One stable ID space over the release library and local SMPL shards."""
+
+    def __init__(self, libraries: list[Library]):
+        if not libraries:
+            raise ValueError("at least one library is required")
+        windows = {library.window for library in libraries}
+        if len(windows) != 1:
+            raise ValueError("all library shards must use the same window")
+        self.libraries = libraries
+        self.window = libraries[0].window
+        self.offsets = []
+        total = 0
+        for library in libraries:
+            self.offsets.append(total)
+            total += len(library)
+        self.names = [name for library in libraries for name in library.names]
+        self.families = [family for library in libraries
+                         for family in library.families]
+        self.datasets = [dataset for library in libraries
+                         for dataset in library.datasets]
+        self.sources = [source for library in libraries
+                        for source in library.sources]
+        self.source_frames = [frames for library in libraries
+                              for frames in library.source_frames]
+        self.tokens = np.concatenate([library.tokens for library in libraries])
+
+    def __len__(self) -> int:
+        return len(self.names)
+
+    @property
+    def has_raw(self) -> bool:
+        return all(library.has_raw for library in self.libraries)
+
+    def _local(self, index: int) -> tuple[Library, int]:
+        index = int(index)
+        if index < 0 or index >= len(self):
+            raise IndexError(index)
+        shard = bisect_right(self.offsets, index) - 1
+        return self.libraries[shard], index - self.offsets[shard]
+
+    def raw_codes(self, index: int) -> np.ndarray:
+        library, local = self._local(index)
+        return library.raw_codes(local)
+
+    def source_local_rot6d(self, index: int) -> np.ndarray | None:
+        library, local = self._local(index)
+        return library.source_local_rot6d(local)
+
+    def source_motion(self, index: int) -> dict | None:
+        library, local = self._local(index)
+        return library.source_motion(local)
+
+    def frames(self, index: int) -> int:
+        library, local = self._local(index)
+        return library.frames(local)
+
+    def root_delta(self, index: int, body: str, body_reach=None,
+                   human_reach=None):
+        library, local = self._local(index)
+        return library.root_delta(local, body, body_reach, human_reach)
+
+    def playback_root_delta(self, index: int, body: str, body_reach=None,
+                            human_reach=None):
+        library, local = self._local(index)
+        return library.playback_root_delta(
+            local, body, body_reach, human_reach)
+
+    def motion_metrics(self, index: int) -> dict:
+        library, local = self._local(index)
+        return library.motion_metrics(local)
+
+    def entry(self, index: int):
+        library, local = self._local(index)
+        return library.entry(local)
+
+    def search(self, q: str = "", family: str = "", offset: int = 0,
+               limit: int = 24, dataset: str = "") -> dict:
+        rows = []
+        query = q.lower()
+        for i, name in enumerate(self.names):
+            if family and self.families[i] != family:
+                continue
+            if dataset and self.datasets[i] != dataset:
+                continue
+            if query and query not in name.lower():
+                continue
+            rows.append(i)
+        if family == "jump":
+            rows.sort(key=lambda i: self.motion_metrics(i)["vertical_range_cm"]
+                      or 0.0, reverse=True)
+        page = rows[offset:offset + limit]
+        return {"total": len(rows), "items": [
+            {"id": i, "name": self.names[i], "family": self.families[i],
+             "dataset": self.datasets[i], "source": self.sources[i],
+             "frames": self.frames(i),
+             **self.motion_metrics(i)} for i in page]}
+
+    def dataset_summary(self) -> list[dict]:
+        return [{"id": key, "label": _dataset_label(key),
+                 "count": self.datasets.count(key)}
+                for key in dict.fromkeys(self.datasets)]
+
+    def resolve_portal(self, clip: str, tokens: np.ndarray) -> int | None:
+        exact = [i for i, name in enumerate(self.names) if name == clip]
+        if exact:
+            return exact[0]
+        prefix = [i for i, name in enumerate(self.names)
+                  if name.startswith(clip) or clip.startswith(name)]
+        if len(prefix) == 1:
+            return prefix[0]
+        query = np.asarray(tokens, dtype=self.tokens.dtype)
+        if query.shape != (self.tokens.shape[1],):
+            return None
+        matches = np.flatnonzero(np.all(self.tokens == query[None], axis=1))
+        return int(matches[0]) if len(matches) else None

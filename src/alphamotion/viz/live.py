@@ -206,10 +206,9 @@ class LiveViewer:
         from scipy.spatial.transform import Rotation
         from ..engine.descriptor import build_from_mjcf
         from .kinematics import (apply_ground_safe_pose,
-                                 contact_stabilized_root_offsets,
                                  first_frame_ground_height,
                                  free_root_address, joint_qpos_map,
-                                 source_joint_map,
+                                 root_world_offsets, source_joint_map,
                                  smooth_camera_path, visual_mesh_geom_ids)
         model = mj.MjModel.from_xml_path(str(xml))
         data = mj.MjData(model)
@@ -228,8 +227,12 @@ class LiveViewer:
         pos = np.zeros((T, len(gids), 3), np.float32)
         wxyz = np.zeros((T, len(gids), 4), np.float32)
         focus = np.zeros((T, 3), np.float64)
-        root_off, _contact_report = contact_stabilized_root_offsets(
-            model, data, trace, spec, tab, src_of, root_adr, ground_z)
+        from ..engine.odometry import foot_bodies, stance_offsets
+        fb = foot_bodies(model) if root_adr >= 0 else []
+        fw = np.zeros((T, len(fb), 3))
+        root_off = root_world_offsets(
+            trace.root_t, T) if getattr(trace, "root_t", None) is not None \
+            else np.zeros((T, 3))
         for t in range(T):
             xyz = root_off[t].copy(); xyz[2] += ground_z
             apply_ground_safe_pose(model, data, trace, spec, tab, src_of,
@@ -238,11 +241,20 @@ class LiveViewer:
                 focus[t] = data.xpos[root_body]
             else:
                 focus[t] = np.mean(data.geom_xpos[gids], axis=0)
+            for i, b in enumerate(fb):
+                fw[t, i] = data.xpos[b]
             for i, gid in enumerate(gids):
                 pos[t, i] = data.geom_xpos[gid]
                 wxyz[t, i] = Rotation.from_matrix(
                     data.geom_xmat[gid].reshape(3, 3)).as_quat(
                         scalar_first=True)
+        # Preserve an explicit source root trajectory exactly. Only motions
+        # without root data use the original contact-derived stride fallback.
+        if getattr(trace, "root_t", None) is None and len(fb):
+            off = stance_offsets(fw)
+            pos[:, :, 0] += off[:, 0:1].astype(np.float32)
+            pos[:, :, 1] += off[:, 1:2].astype(np.float32)
+            focus[:, :2] += off[:, :2]
         with self._lock:
             self._clear_content()
             self._skin_vertices = None
@@ -285,7 +297,9 @@ class LiveViewer:
     def set_smplx_skin(self, vertices: np.ndarray, faces: np.ndarray,
                        title: str, fps: float = 30.0) -> None:
         """Display an independently controlled, fully skinned SMPL-X motion."""
-        vertices = np.asarray(vertices, np.float32)
+        # Long imported clips stay compact in float16; only the visible frame
+        # is expanded to float32 when it is sent to the browser.
+        vertices = np.asarray(vertices)
         faces = np.asarray(faces, np.uint32)
         if vertices.ndim != 3 or vertices.shape[-1] != 3 or not len(vertices):
             raise ValueError("SMPL-X vertices must have shape [T,V,3]")
@@ -293,18 +307,20 @@ class LiveViewer:
             self._clear_content()
             self._skin_vertices = vertices
             self._handles = [self.server.scene.add_mesh_simple(
-                "/world/source/smplx", vertices=vertices[0], faces=faces,
+                "/world/source/smplx",
+                vertices=vertices[0].astype(np.float32), faces=faces,
                 color=(221, 170, 116), side="double", flat_shading=False,
                 cast_shadow=True, receive_shadow=True)]
             self._pos = np.zeros((len(vertices), 1, 3), np.float32)
             self._wxyz = None
             self._fps = float(fps) or 30.0
-            lo, hi = vertices.min(axis=(0, 1)), vertices.max(axis=(0, 1))
+            lo = vertices.min(axis=(0, 1)).astype(np.float32)
+            hi = vertices.max(axis=(0, 1)).astype(np.float32)
             center = (lo + hi) * 0.5
             # Keep the default camera framed around the complete source clip,
             # but retain a moving per-frame centre for Follow mode.
-            frame_lo = vertices.min(axis=1)
-            frame_hi = vertices.max(axis=1)
+            frame_lo = vertices.min(axis=1).astype(np.float32)
+            frame_hi = vertices.max(axis=1).astype(np.float32)
             from .kinematics import smooth_camera_path
             self._frame_center = smooth_camera_path(
                 (frame_lo + frame_hi) * 0.5, self._fps, window_s=0.30)
@@ -430,7 +446,8 @@ class LiveViewer:
             with self.server.atomic():
                 skin_vertices = getattr(self, "_skin_vertices", None)
                 if skin_vertices is not None:
-                    self._handles[0].vertices = skin_vertices[t]
+                    self._handles[0].vertices = skin_vertices[t].astype(
+                        np.float32)
                 else:
                     for i, h in enumerate(self._handles):
                         h.position = self._pos[t, i]
