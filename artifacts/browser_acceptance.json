@@ -1,0 +1,44 @@
+{
+  "layout": {
+    "title": "AlphaMotion",
+    "width": 1280,
+    "scrollWidth": 1280,
+    "overflowPx": 0,
+    "iframeWidth": 730,
+    "iframeScrollWidth": 730,
+    "iframeRect": {
+      "x": 250,
+      "y": 50,
+      "width": 730,
+      "height": 537,
+      "top": 50,
+      "right": 980,
+      "bottom": 587,
+      "left": 250
+    },
+    "libraryCards": 14,
+    "bodies": 18,
+    "viewportMessage": "connecting viewport\u2026",
+    "viewportPixelStddev": 33.318,
+    "stability": {
+      "frames": 12,
+      "maxMeanDelta": 0.604,
+      "maxBlackAreaDelta": 0.0001,
+      "maxFrameDiff": 13.497
+    }
+  },
+  "interaction": {
+    "jointLabel": "19 \u00b7 right_elbow_link",
+    "timelineFrames": 138,
+    "resultText": "release\nAPPROVED\nframes\n138\nfamily\njacks\ncontinuity\nPASS\nglobal likelihood\nPASS 1.7773\nfour-limb synergy\nPASS 0.994\nassets\ntrace\nright_elbow_link\n0 cm \u00b7 0\u00b0",
+    "playablePortal": true,
+    "portalStatus": "QC FLAG \u00b7 motion #8",
+    "bodyDetail": "joints21height74.7 cmsourcebundledmeshreadysemantic coverage100% \u00b7 topology+name",
+    "semanticRows": 21,
+    "budgetSlider": true,
+    "overflowPx": 0,
+    "bodyPreviewPixelStddev": 45.498,
+    "atlasGraphPixelStddev": 42.824
+  },
+  "runtime_exceptions": []
+}

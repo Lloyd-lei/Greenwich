@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 
 
 def default_device() -> str:
@@ -42,6 +43,27 @@ class AMConfig:
     # perception (optional): python executable of the env that runs GENMO
     genmo_python: str = os.environ.get("ALPHAMOTION_GENMO_PYTHON", "")
     genmo_repo: str = os.environ.get("ALPHAMOTION_GENMO_REPO", "")
+    # BodyDataStudio remains its own worker/service because it owns a large
+    # SQLite index and long-running augmentation jobs. AlphaMotion starts it,
+    # proxies it under /data-studio/, and reads its published catalog.
+    data_studio_repo: str = os.environ.get(
+        "ALPHAMOTION_DATA_STUDIO_REPO",
+        "/media/sajio/New Volume/BodyDataStudio",
+    )
+    data_studio_root: str = os.environ.get(
+        "ALPHAMOTION_DATA_STUDIO_ROOT",
+        "/media/sajio/New Volume/body_data",
+    )
+    data_studio_cache: str = os.environ.get(
+        "ALPHAMOTION_DATA_STUDIO_CACHE",
+        "/media/sajio/New Volume/CodexDeployments/Greenwich/data/data_studio",
+    )
+    data_studio_port: int = int(os.environ.get(
+        "ALPHAMOTION_DATA_STUDIO_PORT", "8765"))
+
+    @property
+    def data_studio_db(self) -> Path:
+        return Path(self.data_studio_cache) / "bodydata_studio.sqlite3"
 
 
 CONFIG = AMConfig()

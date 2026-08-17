@@ -51,7 +51,7 @@ class Motion(Base):
     fps: Mapped[float] = mapped_column(Float, default=30.0)
     n_frames: Mapped[int] = mapped_column(Integer)
     source: Mapped[str] = mapped_column(String(32), index=True)
-    # library|text_prompt|video|edit|user_upload
+    # library|text_prompt|video|ai_mixed|edit|user_upload
     prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
     skeleton_id: Mapped[int | None] = mapped_column(
         ForeignKey("skeletons.id"), nullable=True)

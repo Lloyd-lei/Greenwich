@@ -41,9 +41,34 @@ class _Client:
         return nullcontext()
 
 
+class _TransformControl:
+    def __init__(self, path, **kwargs):
+        self.path = path
+        self.position = np.asarray(kwargs["position"], np.float64)
+        self.wxyz = np.asarray(kwargs["wxyz"], np.float64)
+        self.removed = False
+        self.callback = None
+
+    def on_update(self, callback):
+        self.callback = callback
+
+    def remove(self):
+        self.removed = True
+
+
+class _Scene:
+    def __init__(self):
+        self.last_control = None
+
+    def add_transform_controls(self, path, **kwargs):
+        self.last_control = _TransformControl(path, **kwargs)
+        return self.last_control
+
+
 class _Server:
     def __init__(self, client):
         self.client = client
+        self.scene = _Scene()
 
     def atomic(self):
         return nullcontext()
@@ -76,6 +101,11 @@ def _viewer(client):
     viewer._world = _World()
     viewer._frame_center = np.asarray([[0, 0, 0], [1, 0, 0], [2, 0, 0]],
                                       np.float64)
+    viewer._frame_root_world = np.asarray(
+        [[0, 0, 0], [0.4, 0.2, 0], [0.8, 0.4, 0]], np.float64)
+    viewer._editor_gizmo = None
+    viewer._editor_gizmo_pivot = None
+    viewer._editor_gizmo_world_base = None
     viewer._camera_center = viewer._frame_center[0].copy()
     viewer._camera_radius = 1.0
     viewer._camera_peer = None
@@ -145,3 +175,35 @@ def test_linked_camera_update_does_not_echo_back_and_snap():
 
     np.testing.assert_allclose(target_camera.position, source_camera.position)
     np.testing.assert_allclose(source_camera.position, source_after_forward_sync)
+
+
+def test_editor_gizmo_shares_world_anchor_and_persists_drag_delta():
+    camera = _Camera([1, -2, 1], [0, 0, 0])
+    viewer = _viewer(_Client(camera))
+
+    initial = viewer.set_editor_gizmo("position", frame=1)
+    control = viewer.server.scene.last_control
+
+    assert control.path == "/world/editor/clip_transform"
+    np.testing.assert_allclose(control.position, viewer._frame_center[1])
+    np.testing.assert_allclose(initial["position"], viewer._frame_root_world[1])
+
+    # Moving a control anchored at the torso stores the corresponding delta
+    # against the clip root, rather than writing the torso height itself.
+    control.position += np.asarray([0.5, -0.25, 0.1])
+    moved = viewer.editor_gizmo_state()
+    np.testing.assert_allclose(
+        moved["position"], viewer._frame_root_world[1] + [0.5, -0.25, 0.1])
+
+
+def test_editor_gizmo_uses_explicit_endpoint_as_drag_base():
+    camera = _Camera([1, -2, 1], [0, 0, 0])
+    viewer = _viewer(_Client(camera))
+    explicit = np.asarray([3.0, -2.0, 0.5])
+
+    viewer.set_editor_gizmo("position", frame=2, position=explicit)
+    control = viewer.server.scene.last_control
+    control.position += np.asarray([-0.2, 0.4, 0.0])
+
+    np.testing.assert_allclose(
+        viewer.editor_gizmo_state()["position"], explicit + [-0.2, 0.4, 0.0])

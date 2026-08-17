@@ -30,6 +30,16 @@ class Library:
         self.names = meta["clips"]
         self.datasets = meta.get("datasets", ["current"] * len(self.names))
         self.sources = meta.get("sources", ["Curated 4096"] * len(self.names))
+        self.data_roles = meta.get("data_roles", [
+            "original" if value == "imported_smpl" else "curated"
+            for value in self.datasets])
+        self.asset_ids = meta.get("asset_ids", [None] * len(self.names))
+        self.origin_ids = meta.get("origin_ids", list(self.asset_ids))
+        self.augmentations = meta.get("augmentations", [""] * len(self.names))
+        self.augmentation_values = meta.get(
+            "augmentation_values", [None] * len(self.names))
+        self.labels = meta.get("labels", [[] for _ in self.names])
+        self.variant_counts = meta.get("variant_counts", [0] * len(self.names))
         self.source_frames = meta.get(
             "source_frames", [meta.get("window", 60)] * len(self.names))
         self.source_models = meta.get("source_models", [None] * len(self.names))
@@ -39,6 +49,11 @@ class Library:
         self._path_lengths = meta.get("path_lengths_m")
         if len(self.datasets) != len(self.names) or len(self.sources) != len(self.names):
             raise ValueError("library dataset/source metadata length mismatch")
+        if any(len(values) != len(self.names) for values in (
+                self.data_roles, self.asset_ids, self.origin_ids,
+                self.augmentations, self.augmentation_values, self.labels,
+                self.variant_counts)):
+            raise ValueError("library data-studio metadata length mismatch")
         if any(len(values) != len(self.names) for values in (
                 self.source_frames, self.source_models, self.source_genders)):
             raise ValueError("library source-motion metadata length mismatch")
@@ -154,13 +169,44 @@ class Library:
             if body_reach and human_reach else 1.0
         return root * scale
 
+    def enrich_catalog(self, catalog: dict[tuple[str, str], dict]) -> None:
+        """Attach BodyDataStudio lineage without mutating encoded shards."""
+        for i, name in enumerate(self.names):
+            # Newly synchronized Data Studio shards carry authoritative IDs
+            # and lineage in their own metadata. Re-matching their names can
+            # confuse an augmented title containing ``__`` with its parent.
+            if self.asset_ids[i]:
+                continue
+            source = str(self.sources[i])
+            title = name.split("__", 1)[-1]
+            record = catalog.get((source.casefold(), title.casefold()))
+            if record is None:
+                continue
+            self.data_roles[i] = record["role"]
+            self.asset_ids[i] = record["asset_id"]
+            self.origin_ids[i] = record["origin_id"]
+            self.augmentations[i] = record["augmentation"]
+            self.augmentation_values[i] = record["augmentation_value"]
+            self.labels[i] = record["labels"]
+            self.variant_counts[i] = len(record["variants"])
+
     def search(self, q: str = "", family: str = "", offset: int = 0,
-               limit: int = 24, dataset: str = "") -> dict:
+               limit: int = 24, dataset: str = "", data_role: str = "",
+               augmentation: str = "", label: str = "",
+               source: str = "") -> dict:
         rows = []
         for i in range(len(self.tokens)):
             if family and self.families[i] != family:
                 continue
             if dataset and self.datasets[i] != dataset:
+                continue
+            if data_role and self.data_roles[i] != data_role:
+                continue
+            if augmentation and self.augmentations[i] != augmentation:
+                continue
+            if label and label not in self.labels[i]:
+                continue
+            if source and self.sources[i] != source:
                 continue
             if q and q.lower() not in self.names[i].lower():
                 continue
@@ -175,6 +221,11 @@ class Library:
         return {"total": len(rows), "items": [
             {"id": int(i), "name": self.names[i], "family": self.families[i],
              "dataset": self.datasets[i], "source": self.sources[i],
+             "data_role": self.data_roles[i],
+             "asset_id": self.asset_ids[i], "origin_id": self.origin_ids[i],
+             "augmentation": self.augmentations[i],
+             "augmentation_value": self.augmentation_values[i],
+             "labels": self.labels[i], "variant_count": self.variant_counts[i],
              "frames": self.frames(i),
              **self.motion_metrics(i)}
             for i in page]}
@@ -236,18 +287,31 @@ class Library:
 
 def load_default() -> Library:
     from ..weights import resolve
-    libraries: list[Library] = [Library(resolve("library") / "library.npz")]
+    libraries: list[Library] = []
     imported = os.environ.get("ALPHAMOTION_IMPORTED_LIBRARY", "").strip()
     if imported:
         root = Path(imported)
         paths = ([root / "library.npz"] if (root / "library.npz").is_file()
                  else sorted(root.glob("*/library.npz")))
         libraries.extend(Library(path) for path in paths)
+    # The release corpus is a model/index fixture, not user data. Keep it as a
+    # fallback for clean-room development, but do not mix it into a connected
+    # Data Studio library unless explicitly requested.
+    include_curated = os.environ.get("ALPHAMOTION_INCLUDE_CURATED", "0") == "1"
+    if include_curated or not libraries:
+        libraries.insert(0, Library(resolve("library") / "library.npz"))
+    try:
+        from ..data_studio import catalog_lookup
+        catalog = catalog_lookup()
+        for library in libraries:
+            library.enrich_catalog(catalog)
+    except Exception:
+        pass
     return libraries[0] if len(libraries) == 1 else CompositeLibrary(libraries)
 
 
 def _dataset_label(key: str) -> str:
-    return {"current": "Current curated", "imported_smpl": "Imported SMPL"}.get(
+    return {"current": "Current curated", "imported_smpl": "Data Studio"}.get(
         key, key.replace("_", " ").title())
 
 
@@ -274,6 +338,19 @@ class CompositeLibrary:
                          for dataset in library.datasets]
         self.sources = [source for library in libraries
                         for source in library.sources]
+        self.data_roles = [value for library in libraries
+                           for value in library.data_roles]
+        self.asset_ids = [value for library in libraries
+                          for value in library.asset_ids]
+        self.origin_ids = [value for library in libraries
+                           for value in library.origin_ids]
+        self.augmentations = [value for library in libraries
+                              for value in library.augmentations]
+        self.augmentation_values = [value for library in libraries
+                                    for value in library.augmentation_values]
+        self.labels = [value for library in libraries for value in library.labels]
+        self.variant_counts = [value for library in libraries
+                               for value in library.variant_counts]
         self.source_frames = [frames for library in libraries
                               for frames in library.source_frames]
         self.tokens = np.concatenate([library.tokens for library in libraries])
@@ -328,13 +405,23 @@ class CompositeLibrary:
         return library.entry(local)
 
     def search(self, q: str = "", family: str = "", offset: int = 0,
-               limit: int = 24, dataset: str = "") -> dict:
+               limit: int = 24, dataset: str = "", data_role: str = "",
+               augmentation: str = "", label: str = "",
+               source: str = "") -> dict:
         rows = []
         query = q.lower()
         for i, name in enumerate(self.names):
             if family and self.families[i] != family:
                 continue
             if dataset and self.datasets[i] != dataset:
+                continue
+            if data_role and self.data_roles[i] != data_role:
+                continue
+            if augmentation and self.augmentations[i] != augmentation:
+                continue
+            if label and label not in self.labels[i]:
+                continue
+            if source and self.sources[i] != source:
                 continue
             if query and query not in name.lower():
                 continue
@@ -346,6 +433,11 @@ class CompositeLibrary:
         return {"total": len(rows), "items": [
             {"id": i, "name": self.names[i], "family": self.families[i],
              "dataset": self.datasets[i], "source": self.sources[i],
+             "data_role": self.data_roles[i],
+             "asset_id": self.asset_ids[i], "origin_id": self.origin_ids[i],
+             "augmentation": self.augmentations[i],
+             "augmentation_value": self.augmentation_values[i],
+             "labels": self.labels[i], "variant_count": self.variant_counts[i],
              "frames": self.frames(i),
              **self.motion_metrics(i)} for i in page]}
 

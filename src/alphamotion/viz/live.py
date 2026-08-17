@@ -31,7 +31,7 @@ class LiveViewer:
         self.server.gui.configure_theme(
             control_layout="collapsible", control_width="small",
             dark_mode=True, show_logo=False, show_share_button=False,
-            brand_color=(255, 126, 0))
+            brand_color=(38, 128, 235))
         self._handles: list = []
         self._annotations: list = []
         self._pos = None
@@ -41,6 +41,7 @@ class LiveViewer:
         self._camera_center = np.array([0.0, 0.0, 0.7], np.float64)
         self._camera_radius = 1.25
         self._frame_center = None
+        self._frame_root_world = None
         self._follow_origin = np.zeros(3, np.float64)
         self._loop_playback = bool(loop_playback)
         self._autoplay = bool(autoplay)
@@ -49,6 +50,9 @@ class LiveViewer:
         self._camera_linked = False
         self._camera_ignore_until = 0.0
         self._camera_hooks: set[int] = set()
+        self._editor_gizmo = None
+        self._editor_gizmo_pivot = None
+        self._editor_gizmo_world_base = None
         # RLock: gui .value setters fire on_update callbacks SYNCHRONOUSLY
         # in the same thread; _show inside those callbacks re-enters the
         # lock (a plain Lock deadlocked the whole GPU worker here)
@@ -185,6 +189,7 @@ class LiveViewer:
             self._wxyz = None
             self._skin_vertices = None
             self._frame_center = None
+            self._frame_root_world = None
             self._world.position = (0.0, 0.0, 0.0)
             self._title.content = "*timeline is empty*"
         # GUI mutations stay outside the lock because setting the slider can
@@ -192,6 +197,71 @@ class LiveViewer:
         self._frame.max = 1
         self._frame.value = 0
         return self.transport_state()
+
+    def editor_gizmo_state(self) -> dict | None:
+        """Return the current native 3-D transform control pose."""
+        handle = self._editor_gizmo
+        if handle is None:
+            return None
+        control_position = np.asarray(handle.position, np.float64)
+        pivot = np.asarray(self._editor_gizmo_pivot, np.float64)
+        base = np.asarray(self._editor_gizmo_world_base, np.float64)
+        # The controls are drawn around the robot's torso so they remain easy
+        # to grab, while the stored transform is the clip's ground/root origin.
+        # Persist only the user's drag delta; otherwise selecting Position
+        # would silently lift a clip by the pelvis height.
+        world_position = base + control_position - pivot
+        return {"position": [float(v) for v in world_position],
+                "control_position": [float(v) for v in control_position],
+                "wxyz": [float(v) for v in handle.wxyz]}
+
+    def clear_editor_gizmo(self) -> None:
+        handle, self._editor_gizmo = self._editor_gizmo, None
+        self._editor_gizmo_pivot = None
+        self._editor_gizmo_world_base = None
+        if handle is not None:
+            handle.remove()
+
+    def set_editor_gizmo(self, mode: str, *, frame: int = 0,
+                         position=None, wxyz=None, on_update=None) -> dict:
+        """Show Viser's native XYZ arrows or KSP-style rotation rings.
+
+        The handle is placed at the selected clip's first visible root when
+        the editor has not persisted an explicit position yet.  It is kept
+        separate from motion mesh handles so playback frame swaps cannot
+        accidentally delete it.
+        """
+        self.clear_editor_gizmo()
+        index = 0
+        if self._frame_center is not None and len(self._frame_center):
+            index = int(np.clip(frame, 0, len(self._frame_center) - 1))
+            pivot = np.asarray(self._frame_center[index], np.float64)
+        else:
+            pivot = np.zeros(3, np.float64)
+        if position is None:
+            if (self._frame_root_world is not None
+                    and len(self._frame_root_world)):
+                base = np.asarray(self._frame_root_world[index], np.float64)
+            else:
+                base = np.zeros(3, np.float64)
+        else:
+            base = np.asarray(position, np.float64)
+        if wxyz is None:
+            wxyz = (1.0, 0.0, 0.0, 0.0)
+        self._editor_gizmo_pivot = pivot.copy()
+        self._editor_gizmo_world_base = base.copy()
+        # Keep the control inside the same scene root as the robot. Follow
+        # mode translates ``/world``; a sibling control would otherwise look
+        # detached from the actor as soon as the camera follows the motion.
+        self._editor_gizmo = self.server.scene.add_transform_controls(
+            "/world/editor/clip_transform", scale=0.45, line_width=4.0,
+            disable_sliders=mode == "rotation",
+            disable_rotations=mode == "position", depth_test=False,
+            position=tuple(float(v) for v in pivot),
+            wxyz=tuple(float(v) for v in wxyz))
+        if on_update is not None:
+            self._editor_gizmo.on_update(on_update)
+        return self.editor_gizmo_state() or {}
 
     # ------------------------------------------------------------- content --
     def _clear_content(self) -> None:
@@ -268,6 +338,7 @@ class LiveViewer:
             frame_lo, frame_hi = pos.min(axis=1), pos.max(axis=1)
             self._frame_center = smooth_camera_path(
                 focus, self._fps, window_s=0.30)
+            self._frame_root_world = root_off.astype(np.float64, copy=True)
             self._camera_center = self._frame_center[0].astype(np.float64)
             self._follow_origin = self._camera_center.copy()
             self._world.position = (0.0, 0.0, 0.0)
@@ -312,6 +383,7 @@ class LiveViewer:
             from .kinematics import smooth_camera_path
             self._frame_center = smooth_camera_path(
                 (frame_lo + frame_hi) * 0.5, self._fps, window_s=0.30)
+            self._frame_root_world = None
             self._camera_center = center.astype(np.float64)
             self._follow_origin = self._camera_center.copy()
             self._world.position = (0.0, 0.0, 0.0)

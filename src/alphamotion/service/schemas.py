@@ -66,6 +66,14 @@ class Segment(APIModel):
     pins: dict[int, int] | None = None
     seed: int = Field(default=0, ge=0, le=2**63 - 1)
     temperature: float = Field(default=0.9, gt=0.0, le=3.0)
+    # Optional per-clip endpoint transforms in the Viser world frame (metres,
+    # Z-up).  The original fields are the start endpoint for backwards
+    # compatibility; ``world_end_*`` pins the final frame. Quaternion order
+    # matches Viser: scalar-first WXYZ.
+    world_position_m: tuple[float, float, float] | None = None
+    world_rotation_wxyz: tuple[float, float, float, float] | None = None
+    world_end_position_m: tuple[float, float, float] | None = None
+    world_end_rotation_wxyz: tuple[float, float, float, float] | None = None
 
     @field_validator("pins")
     @classmethod
@@ -102,6 +110,19 @@ class Segment(APIModel):
             if not self.source_start < end <= self.source_frames:
                 raise ValueError(
                     "source range must satisfy 0 <= start < end <= source_frames")
+        for position in (self.world_position_m, self.world_end_position_m):
+            if position is not None and not all(
+                    abs(float(v)) <= 1000.0 for v in position):
+                raise ValueError(
+                    "world position must stay within +/-1000 metres")
+        import math
+        for rotation in (self.world_rotation_wxyz,
+                         self.world_end_rotation_wxyz):
+            if rotation is None:
+                continue
+            norm = math.sqrt(sum(float(v) ** 2 for v in rotation))
+            if not 0.99 <= norm <= 1.01:
+                raise ValueError("world rotation quaternion must be normalized")
         return self
 
 

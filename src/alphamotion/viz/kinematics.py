@@ -18,6 +18,23 @@ YUP_TO_ZUP = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], np.float64)
 ZUP_CCW_90 = np.array([[0, 1, 0], [-1, 0, 0], [0, 0, 1]], np.float64)
 
 
+def zup_world_rotations_to_yup(rotations: np.ndarray) -> np.ndarray:
+    """Convert editor/Viser Z-up rotations into the model's Y-up basis.
+
+    ``world_rotation_wxyz`` is authored by Viser transform controls, hence it
+    is expressed in the final renderer world.  Model root matrices live in the
+    canonical Y-up frame until :func:`apply_trace_pose` converts them.  A
+    direct multiplication mixes those bases: rotating a coloured gizmo ring
+    then turns the robot around a different axis.  Conjugation keeps the
+    authored world axis invariant through the renderer conversion.
+    """
+    value = np.asarray(rotations, np.float64)
+    if value.ndim < 2 or value.shape[-2:] != (3, 3):
+        raise ValueError("world rotations must end in shape [3,3]")
+    return np.einsum("ij,...jk,kl->...il", YUP_TO_ZUP, value,
+                     YUP_TO_ZUP.T)
+
+
 def _align_vector_step(source: np.ndarray, target: np.ndarray,
                        angle: float | None = None) -> np.ndarray:
     """Minimal column-vector rotation taking source toward target."""
@@ -134,7 +151,7 @@ def free_root_address(model) -> int:
     return roots[0] if roots else -1
 
 
-def root_world_offsets(root_t, frames: int) -> np.ndarray:
+def root_world_offsets(root_t, frames: int, origin_m=None) -> np.ndarray:
     """Convert root translation [T,3] cm Y-up to [T,3] m Z-up.
 
     Corpus root trajectories are first-frame anchored, but subtracting the
@@ -149,7 +166,13 @@ def root_world_offsets(root_t, frames: int) -> np.ndarray:
     if not np.isfinite(root).all():
         raise ValueError("root_t contains NaN or infinity")
     root = root - root[0]
-    return np.stack([root[:, 2], root[:, 0], root[:, 1]], axis=1) / 100.0
+    world = np.stack([root[:, 2], root[:, 0], root[:, 1]], axis=1) / 100.0
+    if origin_m is not None:
+        origin = np.asarray(origin_m, np.float64)
+        if origin.shape != (3,) or not np.isfinite(origin).all():
+            raise ValueError("root world origin must contain three finite values")
+        world += origin[None]
+    return world
 
 
 def world_offsets_to_root_cm(offsets: np.ndarray) -> np.ndarray:
@@ -278,7 +301,17 @@ def contact_stabilized_root_offsets(model, data, trace, spec, qpos_map,
     a copied human trajectory cannot account for.
     """
     from ..engine.odometry import foot_bodies, stance_offsets
-    offsets = root_world_offsets(getattr(trace, "root_t", None), trace.frames)
+    offsets = root_world_offsets(
+        getattr(trace, "root_t", None), trace.frames,
+        getattr(trace, "root_origin_m", None))
+    # An editor-authored XYZ endpoint is a hard world-space constraint.  The
+    # stance solver intentionally cancels support-foot velocity; running it
+    # after the edit therefore counteracts a dragged arrow and makes the actor
+    # move opposite to, or lag behind, the gizmo.  Such paths are already the
+    # final renderer trajectory and must pass through unchanged.
+    if getattr(trace, "root_path_locked", False):
+        return offsets, {"available": False,
+                         "reason": "world path locked by editor endpoints"}
     if getattr(trace, "contact_stabilized", False):
         return offsets, {"available": True, "already_baked": True}
     if root_adr < 0:

@@ -42,8 +42,24 @@ def test_composite_library_keeps_stable_ids_and_dataset_filter(tmp_path):
     assert result["items"][0]["source"] == "CMU"
     assert library.dataset_summary() == [
         {"id": "current", "label": "Current curated", "count": 1},
-        {"id": "imported_smpl", "label": "Imported SMPL", "count": 1},
+        {"id": "imported_smpl", "label": "Data Studio", "count": 1},
     ]
+
+
+def test_library_filters_data_studio_facets(tmp_path):
+    path = tmp_path / "catalog"
+    library = _shard(path, "walk", "imported_smpl", "CMU", 2)
+    library.data_roles[0] = "augmented"
+    library.augmentations[0] = "time"
+    library.augmentation_values[0] = 1.15
+    library.labels[0] = ["foot_contact"]
+
+    item = library.search(data_role="augmented", augmentation="time",
+                          label="foot_contact")["items"][0]
+
+    assert item["data_role"] == "augmented"
+    assert item["augmentation"] == "time"
+    assert item["augmentation_value"] == 1.15
 
 
 def test_composite_library_exposes_exact_source_rotation_sidecar(tmp_path):

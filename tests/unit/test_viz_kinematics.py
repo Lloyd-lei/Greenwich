@@ -4,11 +4,14 @@ import mujoco as mj
 import numpy as np
 
 from alphamotion.viz.kinematics import (balanced_root_rotations,
+                                        contact_stabilized_root_offsets,
                                         preview_joint_positions,
                                         root_world_offsets,
                                         smooth_camera_path,
                                         visual_mesh_geom_ids,
-                                        world_offsets_to_root_cm)
+                                        world_offsets_to_root_cm,
+                                        YUP_TO_ZUP,
+                                        zup_world_rotations_to_yup)
 
 
 def test_root_offsets_keep_all_three_axes():
@@ -18,6 +21,36 @@ def test_root_offsets_keep_all_three_axes():
     np.testing.assert_allclose(out[1], [0.07, 0.02, 0.05])
     np.testing.assert_allclose(
         root_world_offsets(world_offsets_to_root_cm(out), 2), out)
+
+
+def test_editor_world_rotation_keeps_the_same_axis_after_basis_conversion():
+    from scipy.spatial.transform import Rotation
+    root_yup = Rotation.from_euler("xyz", [8, 12, -17], degrees=True).as_matrix()
+    edit_zup = Rotation.from_euler("z", 35, degrees=True).as_matrix()
+
+    edited_yup = zup_world_rotations_to_yup(edit_zup) @ root_yup
+    original_zup = YUP_TO_ZUP.T @ root_yup @ YUP_TO_ZUP
+    edited_zup = YUP_TO_ZUP.T @ edited_yup @ YUP_TO_ZUP
+
+    np.testing.assert_allclose(edited_zup, edit_zup @ original_zup, atol=1e-10)
+
+
+def test_editor_locked_root_path_bypasses_contact_rewrite():
+    trace = SimpleNamespace(
+        frames=3,
+        root_t=np.array([[0, 0, 0], [100, 0, 0], [200, 0, 0]], np.float64),
+        root_origin_m=np.array([2.0, -1.0, 0.25]),
+        root_path_locked=True,
+        contact_stabilized=False,
+    )
+
+    offsets, report = contact_stabilized_root_offsets(
+        None, None, trace, None, None, None, -1, 0.0)
+
+    np.testing.assert_allclose(offsets,
+                               [[2, -1, .25], [2, 0, .25], [2, 1, .25]])
+    assert report["available"] is False
+    assert "locked" in report["reason"]
 
 
 def test_root_balance_removes_bias_and_caps_dynamic_tilt():

@@ -1,0 +1,32 @@
+{
+  "layout": {
+    "title": "AlphaMotion",
+    "width": 390,
+    "scrollWidth": 390,
+    "overflowPx": 0,
+    "iframeWidth": 390,
+    "iframeScrollWidth": 390,
+    "iframeRect": {
+      "x": 0,
+      "y": 50,
+      "width": 390,
+      "height": 417.671875,
+      "top": 50,
+      "right": 390,
+      "bottom": 467.671875,
+      "left": 0
+    },
+    "libraryCards": 14,
+    "bodies": 18,
+    "viewportMessage": "connecting viewport\u2026",
+    "viewportPixelStddev": 37.739,
+    "stability": {
+      "frames": 12,
+      "maxMeanDelta": 1.517,
+      "maxBlackAreaDelta": 0.0,
+      "maxFrameDiff": 18.205
+    }
+  },
+  "interaction": null,
+  "runtime_exceptions": []
+}

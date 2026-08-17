@@ -22,6 +22,31 @@ def test_segment_contracts():
                 source_start=10, source_end=30)
 
 
+def test_segment_world_transform_contracts():
+    transformed = Segment(
+        kind="library", library_id=2, n=20,
+        world_position_m=(1.0, -2.0, 0.5),
+        world_rotation_wxyz=(1.0, 0.0, 0.0, 0.0),
+        world_end_position_m=(3.0, 4.0, 0.5),
+        world_end_rotation_wxyz=(0.0, 0.0, 0.0, 1.0))
+    assert transformed.world_position_m == (1.0, -2.0, 0.5)
+    assert transformed.world_rotation_wxyz == (1.0, 0.0, 0.0, 0.0)
+    assert transformed.world_end_position_m == (3.0, 4.0, 0.5)
+    assert transformed.world_end_rotation_wxyz == (0.0, 0.0, 0.0, 1.0)
+    with pytest.raises(ValidationError):
+        Segment(kind="library", library_id=2, n=20,
+                world_position_m=(1001.0, 0.0, 0.0))
+    with pytest.raises(ValidationError):
+        Segment(kind="library", library_id=2, n=20,
+                world_rotation_wxyz=(2.0, 0.0, 0.0, 0.0))
+    with pytest.raises(ValidationError):
+        Segment(kind="library", library_id=2, n=20,
+                world_end_position_m=(0.0, -1001.0, 0.0))
+    with pytest.raises(ValidationError):
+        Segment(kind="library", library_id=2, n=20,
+                world_end_rotation_wxyz=(0.0, 0.0, 0.0, 0.0))
+
+
 def test_se3_contracts():
     with pytest.raises(ValidationError):
         SE3Control(joint=0, frame_start=4, frame_end=4)
