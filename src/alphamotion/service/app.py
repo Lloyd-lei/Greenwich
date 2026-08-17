@@ -579,7 +579,8 @@ def create_app() -> FastAPI:
         from ..engine import constraints as MP
         from ..engine.nets.rotations import rot6d_to_matrix
         from ..engine.trace import MotionTrace
-        from ..viz.kinematics import balanced_root_rotations
+        from ..viz.kinematics import (balanced_root_rotations,
+                                      stabilize_trace_root_translation)
 
         emb = registry.load(target_body)
         rot, _ = _decode_full_batched(codes, emb.spec, emb.dof)
@@ -600,6 +601,10 @@ def create_app() -> FastAPI:
             stage=np.zeros(len(codes), np.int32), fps=fps, title=title,
             target=target_body, joint_names=list(emb.spec.joint_names),
             root_t=None if root_t is None else np.asarray(root_t, np.float64))
+        if emb.xml and Path(emb.xml).is_file():
+            trace.root_t, report = stabilize_trace_root_translation(
+                trace, emb.xml, target_body)
+            trace.contact_stabilized = bool(report.get("available", False))
         return trace, emb
 
     def _finalize(codes, target_body, title, source, prompt=None,
@@ -829,6 +834,25 @@ def create_app() -> FastAPI:
                             joint_names=list(emb.spec.joint_names),
                             root_t=None if root_t is None
                             else np.asarray(root_t, np.float64))
+        # Bake contact correction into new traces so downloaded assets, the
+        # live viewer, and MP4 export share the same target-specific world
+        # trajectory. Older traces receive the same correction at render time.
+        contact_report = {"available": False, "reason": "no target mesh"}
+        if emb.xml:
+            try:
+                from ..viz.kinematics import stabilize_trace_root_translation
+                trace.root_t, contact_report = stabilize_trace_root_translation(
+                    trace, emb.xml, target_body)
+                trace.contact_stabilized = bool(
+                    contact_report.get("available", False))
+            except Exception as exc:  # rendering remains usable without it
+                contact_report = {"available": False,
+                                  "reason": f"contact solve failed: {exc}"}
+        qc["contact_stability"] = contact_report
+        rrep["contact_stabilization"] = contact_report
+        if contact_report.get("available"):
+            release_ok = bool(release_ok and contact_report.get("passed"))
+            qc["release_passed"] = release_ok
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family or family_of(prompt or mid_title)
