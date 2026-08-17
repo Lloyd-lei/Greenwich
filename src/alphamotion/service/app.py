@@ -9,14 +9,20 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
+import os
+import sys
 import time
 import uuid
+from collections import OrderedDict
 from pathlib import Path
 
+import httpx
 import numpy as np
 import torch
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket
-from fastapi.responses import FileResponse
+from fastapi import (FastAPI, File, HTTPException, Query, Request, UploadFile,
+                     WebSocket)
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from ..atlas.families import FAMILIES, family_id, family_of
@@ -34,22 +40,96 @@ from .pool import POOL
 from .schemas import JumpRequest, PlayRequest, Segment, TimelineRequest
 
 FRONTEND = Path(__file__).parent.parent / "assets" / "frontend"
+MODEL_FRAME_BATCH = 256
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AlphaMotion", version="0.1.0")
-    state: dict = {"library": None, "warm": None}
+    state: dict = {"library": None, "warm": None,
+                   "library_previews": OrderedDict(),
+                   "timeline_previews": OrderedDict(),
+                   "edit_previews": OrderedDict(),
+                   "source_skins": OrderedDict(),
+                   "source_codes": OrderedDict(),
+                   "sync_comparison": False,
+                   "editor_gizmo": {"seq": 0, "active": False},
+                   "viewer_revision": 0, "data_studio_sync": None,
+                   "data_studio": None, "data_studio_status": {}}
+
+    async def _sync_data_studio_library() -> None:
+        """Publish saved derived clips, then atomically reload the ID space."""
+        current = state.get("data_studio_sync")
+        if isinstance(current, dict) and current.get("status") == "running":
+            return
+        state["data_studio_sync"] = {"status": "running", "started": time.time()}
+        project = Path(__file__).resolve().parents[3]
+        script = project / "scripts" / "sync_data_studio_library.py"
+        env = os.environ.copy()
+        process = await asyncio.create_subprocess_exec(
+            sys.executable, str(script), cwd=str(project), env=env,
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+        stdout, stderr = await process.communicate()
+        if process.returncode:
+            state["data_studio_sync"] = {
+                "status": "failed", "finished": time.time(),
+                "error": stderr.decode(errors="replace")[-1200:]}
+            return
+        try:
+            report = json.loads(stdout.decode(errors="replace"))
+        except (ValueError, TypeError):
+            report = {"output": stdout.decode(errors="replace")[-1200:]}
+        from ..atlas.library import load_default as load_library
+        state["library"] = load_library()
+        state["library_previews"].clear()
+        state["source_skins"].clear()
+        state["data_studio_sync"] = {
+            "status": "ready", "finished": time.time(), **report}
+
+    def _decode_full_batched(codes, spec, dof):
+        """Decode long clips without materialising huge model activations."""
+        rot, pos = [], []
+        for chunk in codes.split(MODEL_FRAME_BATCH):
+            chunk_rot, chunk_pos = POOL.greenwich.decode_full(
+                chunk, spec, dof)
+            rot.append(chunk_rot.detach())
+            pos.append(chunk_pos.detach())
+        return torch.cat(rot), torch.cat(pos)
+
+    def _project_batched(global_rotations, spec, dof_t, rest_t,
+                         method="global", lm_iters=20):
+        """Project independent frames in bounded GPU batches."""
+        from ..engine import constraints as MP
+        feasible, positions, angles = [], [], []
+        for chunk in global_rotations.split(MODEL_FRAME_BATCH):
+            f, p, q = MP.project(
+                chunk, spec, dof_t, rest=rest_t,
+                method=method, lm_iters=lm_iters)
+            feasible.append(f.detach())
+            positions.append(p.detach())
+            angles.append(q.detach())
+        return torch.cat(feasible), torch.cat(positions), torch.cat(angles)
 
     @app.on_event("startup")
     async def _startup():
         from ..atlas.library import load_default as load_library
         from ..config import CONFIG
-        from ..embodiment import registry
-        from ..engine.trace import MotionTrace
         from ..viz.live import LiveViewer
         state["warm"] = POOL.warm()
+        from ..data_studio import DataStudioManager
+        state["data_studio"] = DataStudioManager()
+        state["data_studio_status"] = state["data_studio"].start()
         state["library"] = load_library()
-        state["live"] = LiveViewer(CONFIG.viewer_ports[0])
+        # An empty editor must also have an idle player. Motions are started
+        # explicitly by the Studio transport after a timeline is populated.
+        state["live"] = LiveViewer(CONFIG.viewer_ports[0], autoplay=False)
         state["body_live"] = LiveViewer(CONFIG.viewer_ports[1])
+        def source_finished():
+            if state.get("sync_comparison"):
+                state["live"].set_transport(play=False)
+        state["source_live"] = LiveViewer(
+            CONFIG.viewer_ports[2], loop_playback=False, autoplay=False,
+            on_playback_end=source_finished)
+        state["live"].link_camera_peer(state["source_live"])
+        state["source_live"].link_camera_peer(state["live"])
         state["restored_motion"] = None
 
         # Async jobs cannot resume across a process restart. Leaving their
@@ -63,8 +143,6 @@ def create_app() -> FastAPI:
                 job.status = "failed"
                 job.error = "service restarted before this job completed"
                 job.finished_at = dt.datetime.utcnow()
-            recent = s.query(Motion).order_by(
-                Motion.id.desc()).limit(32).all()
             candidates = s.query(Motion).order_by(Motion.id.desc()).limit(
                 max(dynamic_capacity * 4, dynamic_capacity)).all()
             motions = [m for m in candidates
@@ -81,24 +159,10 @@ def create_app() -> FastAPI:
                 if tokens.shape == (32,):
                     atlas.add(tokens, motion.title, family_id(motion.family))
 
-        # Restore the most recent renderable result into the persistent Viser
-        # canvas. A restart should not turn a working studio into a blank page.
-        for motion in recent:
-            try:
-                if not release_passed(motion.gate_passed, motion.qc):
-                    continue
-                trace_path = Path(motion.trace_path)
-                if not trace_path.is_file():
-                    continue
-                trace = MotionTrace.load(trace_path)
-                emb = registry.load(trace.target)
-                if not emb.xml or not Path(emb.xml).is_file():
-                    continue
-                state["live"].set_trace(trace, emb.xml, trace.target)
-                state["restored_motion"] = motion.id
-                break
-            except Exception:  # noqa: BLE001 - skip corrupt legacy artifacts
-                continue
+    @app.on_event("shutdown")
+    async def _shutdown():
+        if state.get("data_studio") is not None:
+            state["data_studio"].stop()
 
     # ------------------------------------------------------------- meta -----
     @app.get("/api/health")
@@ -114,7 +178,10 @@ def create_app() -> FastAPI:
                 "viewer": state["live"].url if state.get("live") else None,
                 "body_viewer": state["body_live"].url
                 if state.get("body_live") else None,
+                "source_viewer": state["source_live"].url
+                if state.get("source_live") else None,
                 "restored_motion": state.get("restored_motion"),
+                "data_studio": state.get("data_studio_status", {}),
                 "capabilities": {
                     "perception": perception["ready"],
                     "perception_detail": perception,
@@ -185,13 +252,411 @@ def create_app() -> FastAPI:
     @app.get("/api/library")
     def library(q: str = Query(default="", max_length=200),
                 family: str = Query(default="", max_length=32),
+                dataset: str = Query(default="", max_length=64),
+                data_role: str = Query(default="", max_length=32),
+                augmentation: str = Query(default="", max_length=64),
+                label: str = Query(default="", max_length=64),
+                source: str = Query(default="", max_length=100),
                 offset: int = Query(default=0, ge=0),
                 limit: int = Query(default=24, ge=1, le=100)):
-        return state["library"].search(q, family, offset, limit)
+        return state["library"].search(
+            q=q, family=family, dataset=dataset, data_role=data_role,
+            augmentation=augmentation, label=label, source=source,
+            offset=offset, limit=limit)
+
+    @app.get("/api/library-datasets")
+    def library_datasets():
+        return {"datasets": state["library"].dataset_summary()}
+
+    @app.get("/api/library-facets")
+    def library_facets():
+        from ..data_studio import catalog_summary
+        return catalog_summary()
+
+    @app.post("/api/library/resolve-assets")
+    def library_resolve_assets(payload: dict):
+        """Resolve Data Studio asset ids into Motion Studio library clips.
+
+        Data Studio owns the durable asset identifiers while Motion Studio
+        uses a dense integer clip index.  Keep that translation server-side so
+        transferred bins survive filtering and never depend on display names.
+        """
+        requested = [str(value) for value in payload.get("asset_ids", [])
+                     if value]
+        lib = state["library"]
+        exact = {asset_id: index for index, asset_id in enumerate(
+            lib.asset_ids) if asset_id}
+
+        # The Linux Data Studio index and the original imported Greenwich
+        # shards can describe the same source clip with different database
+        # ids.  Resolve those originals by their stable source/title identity
+        # so sending an item does not require rebuilding 8k model shards.
+        records: dict[str, tuple[str, str]] = {}
+        unresolved = [value for value in requested if value not in exact]
+        if unresolved:
+            from ..config import CONFIG
+            import sqlite3
+            primary = Path(CONFIG.data_studio_db)
+            if primary.is_file():
+                db = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
+                try:
+                    placeholders = ",".join("?" for _ in unresolved)
+                    for row in db.execute(
+                            f"SELECT id,source,title FROM assets WHERE id IN ({placeholders})",
+                            unresolved):
+                        records[str(row[0])] = (str(row[1]), str(row[2]))
+                finally:
+                    db.close()
+
+        def semantic_index(identity: str) -> int | None:
+            record = records.get(identity)
+            if record is None:
+                return None
+            source, title = record
+            source_key = source.rsplit("/", 1)[-1].replace("AMASS ", "").strip()
+            for index, name in enumerate(lib.names):
+                clip_title = str(name).rsplit("__", 1)[-1]
+                if clip_title == title and str(lib.sources[index]).strip() == source_key:
+                    return index
+            return None
+
+        resolved: list[tuple[str, int]] = []
+        for identity in requested:
+            index = exact.get(identity)
+            if index is None:
+                index = semantic_index(identity)
+            if index is not None:
+                resolved.append((identity, index))
+
+        items = [{
+            "id": int(index), "name": lib.names[index],
+            "family": lib.families[index], "dataset": lib.datasets[index],
+            "source": lib.sources[index],
+            "data_role": lib.data_roles[index],
+            "asset_id": identity,
+            "library_asset_id": lib.asset_ids[index],
+            "origin_id": lib.origin_ids[index],
+            "augmentation": lib.augmentations[index],
+            "augmentation_value": lib.augmentation_values[index],
+            "labels": lib.labels[index],
+            "variant_count": lib.variant_counts[index],
+            "frames": lib.frames(index), **lib.motion_metrics(index),
+        } for identity, index in resolved]
+        found = {identity for identity, _index in resolved}
+        return {"ok": True, "items": items,
+                "missing": [value for value in requested
+                            if value not in found]}
+
+    @app.get("/api/data-studio/status")
+    def data_studio_status():
+        from ..data_studio import catalog_summary
+        manager = state.get("data_studio")
+        runtime = manager.status() if manager is not None else {}
+        state["data_studio_status"] = runtime
+        return {**runtime,
+                "catalog": catalog_summary(),
+                "sync": state.get("data_studio_sync")}
+
+    @app.post("/api/data-studio/sync")
+    async def data_studio_sync():
+        current = state.get("data_studio_sync")
+        if not isinstance(current, dict) or current.get("status") != "running":
+            asyncio.create_task(_sync_data_studio_library())
+        return {"ok": True, "status": "syncing"}
+
+    @app.get("/api/library/{library_id}/detail")
+    def library_detail(library_id: int):
+        """Lineage and review metadata for Motion Studio's asset inspector."""
+        lib = state["library"]
+        if library_id < 0 or library_id >= len(lib):
+            raise HTTPException(404, "no such library clip")
+        from ..data_studio import catalog_by_id
+        catalog = catalog_by_id()
+        asset_id = lib.asset_ids[library_id]
+        record = catalog.get(asset_id) if asset_id else None
+        origin = catalog.get(record["origin_id"]) if record else None
+        variants = [catalog[value] for value in (record or {}).get(
+            "variants", []) if value in catalog]
+        if record and record["role"] == "augmented" and not variants:
+            variants = [record]
+        return {
+            "id": library_id, "name": lib.names[library_id],
+            "family": lib.families[library_id],
+            "source": lib.sources[library_id],
+            "frames": lib.frames(library_id),
+            "data_role": lib.data_roles[library_id],
+            "asset_id": asset_id, "origin_id": lib.origin_ids[library_id],
+            "augmentation": lib.augmentations[library_id],
+            "augmentation_value": lib.augmentation_values[library_id],
+            "labels": lib.labels[library_id],
+            "record": record, "origin": origin, "variants": variants,
+        }
+
+    @app.post("/api/library/{library_id}/label-foot-contact")
+    async def library_label_foot_contact(library_id: int):
+        """Run BodyDataStudio labeling, then expose its sidecar in Motion."""
+        detail = library_detail(library_id)
+        record = detail.get("record") or {}
+        if not record:
+            raise HTTPException(409, "clip has no Data Studio record")
+        from ..config import CONFIG
+        primary = Path(CONFIG.data_studio_db)
+        import sqlite3
+        target_id = ""
+        if primary.is_file():
+            try:
+                db = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
+                row = db.execute(
+                    "SELECT id FROM assets WHERE title=? AND kind='smplh_motion' "
+                    "AND animated=1 AND status='ready' ORDER BY CASE WHEN "
+                    "source=? THEN 0 ELSE 1 END LIMIT 1",
+                    (record.get("title", ""), record.get("source", "")),
+                ).fetchone()
+                target_id = str(row[0]) if row else ""
+            except sqlite3.Error:
+                target_id = ""
+            finally:
+                try:
+                    db.close()
+                except UnboundLocalError:
+                    pass
+        if not target_id:
+            raise HTTPException(
+                409, "clip is still being indexed by Data Studio; retry shortly")
+        base = f"http://127.0.0.1:{CONFIG.data_studio_port}"
+        async with httpx.AsyncClient(timeout=120) as client:
+            started = await client.post(
+                base + "/api/contact-labels",
+                json={"asset_ids": [target_id]})
+            payload = started.json()
+            if started.status_code >= 400 or not payload.get("job_id"):
+                raise HTTPException(started.status_code, payload.get(
+                    "error", "labeling could not start"))
+            job = payload["job_id"]
+            result = None
+            for _ in range(600):
+                await asyncio.sleep(.25)
+                response = await client.get(
+                    base + "/api/contact-labels", params={"job": job})
+                current = response.json()
+                if current.get("status") == "ready":
+                    result = current.get("result") or {}
+                    break
+                if current.get("status") == "failed":
+                    raise HTTPException(500, current.get(
+                        "error", "contact labeling failed"))
+            if result is None:
+                raise HTTPException(504, "contact labeling timed out")
+        await _sync_data_studio_library()
+        return {"ok": True, "label": "foot_contact", "result": result}
+
+    @app.get("/api/library/{library_id}/preview")
+    async def library_preview(library_id: int):
+        """Metadata for the neutral SMPL-X hover preview."""
+        lib = state["library"]
+        if library_id < 0 or library_id >= len(lib):
+            raise HTTPException(404, "no such library clip")
+        return {"id": int(library_id), "name": lib.names[library_id],
+                "family": lib.families[library_id],
+                "dataset": lib.datasets[library_id],
+                "source": lib.sources[library_id],
+                "frames": lib.frames(library_id), "fps": 30.0,
+                "skin": ("neutral SMPL-X · exact source parameters"
+                         if lib.source_motion(library_id) is not None else
+                         "neutral SMPL-X · decoded 60-frame window"),
+                "url": f"/api/library/{library_id}/preview.webp"}
+
+    def _source_skin(library_id: int):
+        lib = state["library"]
+        cache = state["source_skins"]
+        if library_id in cache:
+            cache.move_to_end(library_id)
+            return cache[library_id]
+        from ..viz.smplx_skin import skin_global_rot6d
+        spec, dof, _rest = POOL.human
+        motion = lib.source_motion(library_id)
+        if motion is None:
+            codes = torch.from_numpy(
+                lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
+            rot = POOL.greenwich.decode(codes, spec, dof)
+            root = lib.root_delta(library_id, "human_smpl")
+            hands = betas = None
+            source_kind = "decoded-window"
+        else:
+            from ..engine.spatial import build_global
+            rot, _pos, _reach = build_global(
+                torch.from_numpy(motion["local_rot6d"]), spec, "cpu")
+            root = motion["root_cm"]
+            hands, betas = motion["hand_pose"], motion["betas"]
+            source_kind = "exact-source"
+        vertices, faces = skin_global_rot6d(
+            rot.cpu().numpy(), spec.parents, root_cm=root,
+            hand_pose=hands, betas=betas, device=POOL.device)
+        value = (vertices, faces, lib.names[library_id], 30.0, source_kind)
+        cache[library_id] = value
+        cache.move_to_end(library_id)
+        # Long-form clips can occupy hundreds of MB even in half precision.
+        # Keep only the active source instead of accumulating stale previews.
+        while len(cache) > 1:
+            cache.popitem(last=False)
+        return value
+
+    @app.get("/api/library/{library_id}/preview.webp")
+    async def library_skin_preview(library_id: int):
+        """Fixed-camera SMPL-X skin animation at 1x with a 0.5s loop hold."""
+        lib = state["library"]
+        if library_id < 0 or library_id >= len(lib):
+            raise HTTPException(404, "no such library clip")
+        from ..paths import cache_dir
+        # v3 includes full source duration, source betas and hand articulation.
+        path = cache_dir() / "smplx_previews" / f"v3-{library_id}.webp"
+        if not path.is_file():
+            def work():
+                from ..viz.smplx_skin import animated_preview_webp
+                vertices, faces, _name, fps, _kind = _source_skin(library_id)
+                data = animated_preview_webp(vertices, faces, fps=fps)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            await POOL.run(work)
+        return FileResponse(path, media_type="image/webp",
+                            headers={"cache-control": "public, max-age=31536000"})
 
     @app.get("/api/families")
     def families():
         return {"families": FAMILIES}
+
+    @app.get("/api/viewer/transport")
+    def viewer_transport():
+        return state["live"].transport_state()
+
+    @app.post("/api/viewer/transport")
+    def set_viewer_transport(
+            frame: int | None = Query(default=None, ge=0),
+            play: bool | None = Query(default=None),
+            follow: bool | None = Query(default=None),
+            speed: float | None = Query(default=None, ge=0.25, le=2.0)):
+        result = state["live"].set_transport(
+            frame=frame, play=play, follow=follow, speed=speed)
+        # Follow is a camera behaviour rather than a shared clock.  Mirror it
+        # to the source viewport only while comparison synchronization is on.
+        if follow is not None and state["sync_comparison"]:
+            state["source_live"].set_transport(follow=follow)
+        return result
+
+    @app.post("/api/viewer/clear")
+    def clear_viewer():
+        # Invalidate previews that may still be decoding in the worker. They
+        # must not repopulate the canvas after the final timeline block was
+        # removed.
+        state["viewer_revision"] += 1
+        state["live"].clear_editor_gizmo()
+        state["editor_gizmo"] = {"seq": state["editor_gizmo"].get("seq", 0) + 1,
+                                 "active": False}
+        return state["live"].clear_motion()
+
+    @app.get("/api/viewer/gizmo")
+    def editor_gizmo():
+        return state["editor_gizmo"]
+
+    @app.post("/api/viewer/gizmo")
+    async def set_editor_gizmo(request: Request):
+        payload = await request.json()
+        mode = str(payload.get("mode", "position"))
+        if mode not in {"position", "rotation"}:
+            raise HTTPException(422, "gizmo mode must be position or rotation")
+        position, wxyz = payload.get("position"), payload.get("wxyz")
+        if position is not None and (len(position) != 3 or
+                                     not np.isfinite(position).all()):
+            raise HTTPException(422, "position must be three finite values")
+        if wxyz is not None and (len(wxyz) != 4 or
+                                 not np.isfinite(wxyz).all()):
+            raise HTTPException(422, "wxyz must be four finite values")
+        uid = str(payload.get("uid") or "")
+        endpoint = str(payload.get("endpoint") or "start")
+        if endpoint not in {"start", "end"}:
+            raise HTTPException(422, "gizmo endpoint must be start or end")
+        seq = int(state["editor_gizmo"].get("seq", 0)) + 1
+
+        def changed(event):
+            current = state["editor_gizmo"]
+            pose = state["live"].editor_gizmo_state() or {}
+            current.update({
+                "seq": int(current.get("seq", 0)) + 1,
+                "phase": event.phase,
+                **pose,
+            })
+
+        pose = state["live"].set_editor_gizmo(
+            mode, frame=max(0, int(payload.get("frame", 0))),
+            position=position, wxyz=wxyz, on_update=changed)
+        state["editor_gizmo"] = {"seq": seq, "active": True, "mode": mode,
+                                 "uid": uid, "endpoint": endpoint,
+                                 "phase": "ready", **pose}
+        return state["editor_gizmo"]
+
+    @app.delete("/api/viewer/gizmo")
+    def clear_editor_gizmo():
+        state["live"].clear_editor_gizmo()
+        state["editor_gizmo"] = {"seq": int(state["editor_gizmo"].get("seq", 0)) + 1,
+                                 "active": False}
+        return state["editor_gizmo"]
+
+    @app.post("/api/source/preview/library")
+    async def preview_source_library(library_id: int = Query(ge=0)):
+        lib = state["library"]
+        _require_library_id(lib, library_id)
+        def work():
+            vertices, faces, name, fps, kind = _source_skin(library_id)
+            state["source_live"].set_smplx_skin(
+                vertices, faces, name, fps=fps)
+            if state["sync_comparison"]:
+                state["source_live"].set_transport(
+                    follow=state["live"].transport_state()["follow"])
+            return {**state["source_live"].transport_state(),
+                    "name": name, "skin": "SMPL-X neutral",
+                    "source_kind": kind}
+        return await POOL.run(work)
+
+    @app.get("/api/source/transport")
+    def source_transport():
+        return state["source_live"].transport_state()
+
+    @app.post("/api/source/transport")
+    def set_source_transport(
+            frame: int | None = Query(default=None, ge=0),
+            play: bool | None = Query(default=None),
+            speed: float | None = Query(default=None, ge=0.25, le=2.0),
+            sync: bool = Query(default=False)):
+        state["sync_comparison"] = bool(sync)
+        result = state["source_live"].set_transport(
+            frame=frame, play=play, speed=speed)
+        # Synchronized playback starts/pauses both clocks where they already
+        # are. Deliberately do not seek either side.
+        if play is not None and sync:
+            state["live"].set_transport(play=play)
+        return result
+
+    @app.post("/api/comparison/sync")
+    def set_comparison_sync(enabled: bool = Query(default=False)):
+        state["sync_comparison"] = bool(enabled)
+        target, source = state["live"], state["source_live"]
+        target.set_camera_linked(enabled, reset=False)
+        source.set_camera_linked(enabled, reset=False)
+        # Enabling synchronization adopts the main viewport's current Follow
+        # setting without changing either camera pose.  Once unlinked, leave
+        # the main setting alone and return the source to its fixed camera.
+        source.set_transport(
+            follow=target.transport_state()["follow"] if enabled else False)
+        return {"enabled": bool(enabled)}
+
+    @app.post("/api/comparison/reset-camera")
+    def reset_comparison_camera():
+        """Reset the main view and, while synchronized, the source view."""
+        state["live"].reset_camera()
+        both = bool(state["sync_comparison"])
+        if both:
+            state["source_live"].reset_camera()
+        return {"reset": "both" if both else "target"}
 
     # ------------------------------------------------------------- jobs -----
     def _submit(kind: str, request: dict, runner) -> str:
@@ -274,6 +739,79 @@ def create_app() -> FastAPI:
                 "bytes": total}
 
     # ---------------------------------------------------------- pipeline ----
+    def _library_playback_codes(library_id: int):
+        """Exact full imported source, or the native curated 60f window."""
+        lib = state["library"]
+        motion = lib.source_motion(library_id)
+        if motion is None:
+            return torch.from_numpy(
+                lib.raw_codes(library_id).astype(np.int64)).to(POOL.device)
+        cache = state["source_codes"]
+        if library_id in cache:
+            cache.move_to_end(library_id)
+            return cache[library_id]
+        spec, dof, _rest = POOL.human
+        local = torch.from_numpy(motion["local_rot6d"]).to(POOL.device)
+        pose9, _ = POOL.greenwich.pose9(local, spec, is_global=False)
+        codes = torch.cat([
+            POOL.greenwich.encode(chunk, spec, dof).detach()
+            for chunk in pose9.split(MODEL_FRAME_BATCH)
+        ])
+        cache[library_id] = codes
+        cache.move_to_end(library_id)
+        while len(cache) > 3:
+            cache.popitem(last=False)
+        return codes
+
+    def _rotation_matrix(wxyz) -> np.ndarray:
+        if wxyz is None:
+            return np.eye(3, dtype=np.float64)
+        from scipy.spatial.transform import Rotation
+        w, x, y, z = wxyz
+        return Rotation.from_quat([x, y, z, w]).as_matrix()
+
+    def _segment_rotation_path(seg: Segment, frames: int) -> np.ndarray:
+        """Interpolate the selected clip's start/end world orientation."""
+        start = _rotation_matrix(seg.world_rotation_wxyz)
+        end_value = seg.world_end_rotation_wxyz
+        if end_value is None or frames <= 1:
+            return np.repeat(start[None], max(1, frames), axis=0)
+        from scipy.spatial.transform import Rotation, Slerp
+        end = _rotation_matrix(end_value)
+        key = Rotation.from_matrix(np.stack([start, end]))
+        return Slerp([0.0, 1.0], key)(
+            np.linspace(0.0, 1.0, frames)).as_matrix()
+
+    def _segment_rotation(seg: Segment) -> np.ndarray:
+        """Start orientation retained for bridge-boundary compatibility."""
+        return _rotation_matrix(seg.world_rotation_wxyz)
+
+    def _segment_world_path(seg: Segment, root, frames: int,
+                            anchor_world: np.ndarray):
+        """Return a clip root path and orientation in Viser's Z-up world."""
+        from ..viz.kinematics import root_world_offsets
+        local = root_world_offsets(root, frames)
+        rotations = _segment_rotation_path(seg, frames)
+        local = np.einsum("tij,tj->ti", rotations, local)
+        start = anchor_world if seg.world_position_m is None else \
+            np.asarray(seg.world_position_m, np.float64)
+        absolute = start[None] + local
+        if seg.world_end_position_m is not None:
+            target = np.asarray(seg.world_end_position_m, np.float64)
+            u = np.linspace(0.0, 1.0, frames)[:, None]
+            smooth = u * u * (3.0 - 2.0 * u)
+            absolute += smooth * (target - absolute[-1])
+        return absolute, rotations
+
+    def _world_path_to_root_cm(world: np.ndarray) -> np.ndarray:
+        world = np.asarray(world, np.float64)
+        return np.stack([world[:, 1], world[:, 2], world[:, 0]], axis=1) * 100.0
+
+    def _trace_root_from_world(world: np.ndarray):
+        from ..viz.kinematics import world_offsets_to_root_cm
+        world = np.asarray(world, np.float64)
+        return world_offsets_to_root_cm(world), world[0].copy()
+
     def _segment_codes(seg: Segment, eq, lib, target_body: str | None = None):
         """One library segment -> codes, name, family, and 3-D root path.
 
@@ -284,8 +822,8 @@ def create_app() -> FastAPI:
         origin), never inferred."""
         if seg.kind == "library":
             tok, bounds, name, fam = lib.entry(seg.library_id)
-            raw = torch.from_numpy(
-                lib.raw_codes(seg.library_id).astype(np.int64))
+            raw = _library_playback_codes(seg.library_id)
+            base_n = seg.source_frames or seg.n
             root = None
             if target_body:
                 from ..embodiment import registry
@@ -296,23 +834,47 @@ def create_app() -> FastAPI:
                     rest_positions(target.spec), axis=-1).max())
                 human_reach = float(np.linalg.norm(
                     rest_positions(hspec), axis=-1).max())
-                root = lib.root_delta(seg.library_id, target_body,
-                                      body_reach, human_reach)
-            if root is not None and seg.n != len(root):
+                root = lib.playback_root_delta(
+                    seg.library_id, target_body, body_reach, human_reach)
+            if root is not None and base_n != len(root):
                 from ..engine.timeline import resample_continuous
-                root = resample_continuous(root, seg.n)
-            if seg.n == raw.shape[0] and not seg.pins:
-                return raw.to(eq.device), name, fam, root
-            from ..engine.timeline import interpolate_lattice
-            tokens = torch.from_numpy(tok).long().to(eq.device)
-            for slot, val in (seg.pins or {}).items():
-                tokens[int(slot)] = int(val)
-            ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
-            rot_codes = interpolate_lattice(raw[:, 128:], seg.n)
-            boundary = torch.stack([raw[0], raw[-1]])
-            codes = eq.detokenize(tokens, ep, seg.n,
-                                  boundary_codes=boundary,
-                                  rot_codes=rot_codes)
+                root = resample_continuous(root, base_n)
+            if base_n == raw.shape[0] and not seg.pins:
+                codes = raw.to(eq.device)
+            else:
+                from ..engine.timeline import interpolate_lattice
+                tokens = torch.from_numpy(tok).long().to(eq.device)
+                for slot, val in (seg.pins or {}).items():
+                    tokens[int(slot)] = int(val)
+                ep = eq.endpoints_from_codes(torch.from_numpy(bounds))
+                rot_codes = interpolate_lattice(raw[:, 128:], base_n)
+                boundary = torch.stack([raw[0], raw[-1]])
+                codes = eq.detokenize(tokens, ep, base_n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+
+            # Non-destructive timeline split. Generate the parent material once,
+            # then take the exact requested interval. If the user subsequently
+            # changes this half's time budget, tokenize and retime only the cut
+            # material instead of replaying the complete Library asset.
+            if seg.source_frames is not None:
+                start = seg.source_start
+                end = seg.source_end or seg.source_frames
+                codes = codes[start:end]
+                if root is not None:
+                    root = np.asarray(root)[start:end]
+            if seg.n != len(codes):
+                from ..engine.timeline import (interpolate_lattice,
+                                               resample_continuous)
+                source = codes
+                tokens, ep = eq.tokenize(source)
+                rot_codes = interpolate_lattice(source[:, 128:], seg.n)
+                boundary = torch.stack([source[0], source[-1]])
+                codes = eq.detokenize(tokens, ep, seg.n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+                if root is not None:
+                    root = resample_continuous(root, seg.n)
             return codes, name, fam, root
         raise ValueError(f"segment kind '{seg.kind}' not handled here")
 
@@ -337,9 +899,61 @@ def create_app() -> FastAPI:
             boundary_codes=torch.stack([prev_codes[-1], next_codes[0]]))
         return generated[1:-1]
 
+    def _preview_trace(codes, target_body: str, title: str,
+                       root_t=None, fps: float = 30.0, root_origin_m=None,
+                       root_rotation_delta=None, root_path_locked=False):
+        """Decode a source clip for the live viewer without creating a Motion.
+
+        Timeline scrubbing is an editor operation, not a generation request;
+        previews therefore stay in a small in-memory LRU instead of polluting
+        SQLite, Atlas memory, result files, or quality-control history.
+        """
+        from ..embodiment import registry
+        from ..engine import constraints as MP
+        from ..engine.nets.rotations import rot6d_to_matrix
+        from ..engine.trace import MotionTrace
+        from ..viz.kinematics import (
+            balanced_root_rotations, stabilize_trace_root_translation,
+            zup_world_rotations_to_yup)
+
+        emb = registry.load(target_body)
+        rot, _ = _decode_full_batched(codes, emb.spec, emb.dof)
+        dof_t = torch.as_tensor(emb.dof, device=POOL.device,
+                                dtype=torch.float64)
+        rest_t = torch.as_tensor(emb.rest, device=POOL.device,
+                                 dtype=torch.float64)
+        feasible, gp, q = _project_batched(
+            rot6d_to_matrix(rot).double(), emb.spec, dof_t, rest_t,
+            method="global", lm_iters=20)
+        root_index = int(np.where(np.asarray(emb.spec.parents) < 0)[0][0])
+        rootR = rot6d_to_matrix(
+            feasible[:, root_index:root_index + 1]).cpu().numpy()[:, 0]
+        rootR = balanced_root_rotations(rootR)
+        if root_rotation_delta is not None:
+            delta = np.asarray(root_rotation_delta, np.float64)
+            if delta.shape != rootR.shape:
+                raise ValueError("root rotation edits must have shape [T,3,3]")
+            rootR = zup_world_rotations_to_yup(delta) @ rootR
+        trace = MotionTrace(
+            q=q.detach().cpu().numpy(), rootR=rootR,
+            gp=gp.detach().cpu().numpy(),
+            stage=np.zeros(len(codes), np.int32), fps=fps, title=title,
+            target=target_body, joint_names=list(emb.spec.joint_names),
+            root_t=None if root_t is None else np.asarray(root_t, np.float64),
+            root_origin_m=None if root_origin_m is None else
+            np.asarray(root_origin_m, np.float64),
+            root_path_locked=bool(root_path_locked))
+        if (emb.xml and Path(emb.xml).is_file()
+                and not trace.root_path_locked):
+            trace.root_t, report = stabilize_trace_root_translation(
+                trace, emb.xml, target_body)
+            trace.contact_stabilized = bool(report.get("available", False))
+        return trace, emb
+
     def _finalize(codes, target_body, title, source, prompt=None,
                   parent=None, render=True, fps=30.0, se3=(), root_t=None,
-                  family=None, stage=None):
+                  family=None, stage=None, root_origin_m=None,
+                  root_rotation_delta=None, root_path_locked=False):
         """codes -> decode -> refine -> gate -> QC -> trace -> DB -> atlas."""
         from ..embodiment import registry
         from ..engine import constraints as MP
@@ -360,8 +974,8 @@ def create_app() -> FastAPI:
             root_t = np.asarray(root_t, np.float64).copy()
             if root_t.shape != (len(codes), 3):
                 raise ValueError("root_t must have shape [frames, 3]")
-        rot, _pos_n = gw.decode_full(codes, emb.spec, emb.dof)
-        rot_h = gw.decode(codes, hspec, hdof)
+        rot, _pos_n = _decode_full_batched(codes, emb.spec, emb.dof)
+        rot_h, _ = _decode_full_batched(codes, hspec, hdof)
         # Whole-chain global LM maps decoded rotations onto the target body's
         # feasible joint manifold. The spatial position head is root-relative;
         # it remains available for diagnostics but is not a world-root head.
@@ -370,8 +984,8 @@ def create_app() -> FastAPI:
                                 dtype=torch.float64)
         rest_t = torch.as_tensor(emb.rest, device=POOL.device,
                                  dtype=torch.float64)
-        feasible, gp, q = MP.project(Rg, emb.spec, dof_t, rest=rest_t,
-                                     method="global", lm_iters=20)
+        feasible, gp, q = _project_batched(
+            Rg, emb.spec, dof_t, rest_t, method="global", lm_iters=20)
         q = q.detach()
         gp = gp.detach()
         refined = feasible.float().detach()
@@ -389,9 +1003,9 @@ def create_app() -> FastAPI:
             gp = gp.detach()
         repaired, hold_report = repair_generated_holds(refined, stage)
         if hold_report["repaired_frames"]:
-            feasible, gp, q = MP.project(
-                rot6d_to_matrix(repaired).double(), emb.spec, dof_t,
-                rest=rest_t, method="global", lm_iters=20)
+            feasible, gp, q = _project_batched(
+                rot6d_to_matrix(repaired).double(), emb.spec, dof_t, rest_t,
+                method="global", lm_iters=20)
             q = q.detach()
             gp = gp.detach()
             refined = feasible.float().detach()
@@ -551,10 +1165,16 @@ def create_app() -> FastAPI:
         # trace + assets
         rootR = rot6d_to_matrix(
             refined[:, root_index:root_index + 1, :6]).cpu().numpy()[:, 0]
-        # world translation: DATA passthrough when the source carries a root
-        # trajectory (owner design — window's first frame = world origin);
-        # renderers fall back to contact-derived stride odometry only when
-        # root_t is absent (e.g. generated interiors with no data trajectory).
+        # Robot roots need a balance guard: the human pelvis stream can carry
+        # a persistent retargeting lean that is not a valid robot base pose.
+        from ..viz.kinematics import balanced_root_rotations
+        rootR = balanced_root_rotations(rootR)
+        if root_rotation_delta is not None:
+            delta = np.asarray(root_rotation_delta, np.float64)
+            if delta.shape != rootR.shape:
+                raise ValueError("root rotation edits must have shape [T,3,3]")
+            from ..viz.kinematics import zup_world_rotations_to_yup
+            rootR = zup_world_rotations_to_yup(delta) @ rootR
         mid_title = title or f"{source}-{int(time.time())}"
         trace = MotionTrace(q=q.detach().cpu().numpy(), rootR=rootR,
                             gp=gp.detach().cpu().numpy(),
@@ -563,7 +1183,38 @@ def create_app() -> FastAPI:
                             tokens=tok_final.cpu().numpy(),
                             joint_names=list(emb.spec.joint_names),
                             root_t=None if root_t is None
-                            else np.asarray(root_t, np.float64))
+                            else np.asarray(root_t, np.float64),
+                            root_origin_m=None if root_origin_m is None else
+                            np.asarray(root_origin_m, np.float64),
+                            root_path_locked=bool(root_path_locked))
+        # Bake contact correction into new traces so downloaded assets, the
+        # live viewer, and MP4 export share the same target-specific world
+        # trajectory. Older traces receive the same correction at render time.
+        contact_report = {"available": False, "reason": "no target mesh"}
+        if emb.xml and not trace.root_path_locked:
+            try:
+                from ..viz.kinematics import stabilize_trace_root_translation
+                trace.root_t, contact_report = stabilize_trace_root_translation(
+                    trace, emb.xml, target_body)
+                trace.contact_stabilized = bool(
+                    contact_report.get("available", False))
+            except Exception as exc:  # rendering remains usable without it
+                contact_report = {"available": False,
+                                  "reason": f"contact solve failed: {exc}"}
+        qc["contact_stability"] = contact_report
+        ai_method = {"text_prompt": "text-to-motion",
+                     "video": "video-to-motion",
+                     "ai_mixed": "multimodal-motion"}.get(source)
+        if ai_method:
+            # This metadata makes generated motions durable, queryable assets
+            # instead of anonymous entries that only happen to appear in Recent.
+            qc["generation"] = {"ai_generated": True,
+                                "method": ai_method,
+                                "auto_saved": True}
+        rrep["contact_stabilization"] = contact_report
+        if contact_report.get("available"):
+            release_ok = bool(release_ok and contact_report.get("passed"))
+            qc["release_passed"] = release_ok
         tp = results_dir() / f"{uuid.uuid4().hex[:10]}_trace.npz"
         trace.save(tp)
         fam = family or family_of(prompt or mid_title)
@@ -603,6 +1254,9 @@ def create_app() -> FastAPI:
                "refiner": rrep, "family": fam, "se3": se3_report,
                "release_passed": release_ok,
                "tokens": [int(t) for t in tok_final.cpu()]}
+        if ai_method:
+            out["ai_asset"] = {"saved": True, "method": ai_method,
+                               "collection": "AI Generations"}
         if render:
             mp4 = _try_render(tp, target_body)
             if mp4:
@@ -645,6 +1299,165 @@ def create_app() -> FastAPI:
         if index < 0 or index >= len(lib):
             raise HTTPException(422, f"library_id must be in [0, {len(lib)-1}]")
 
+    @app.post("/api/viewer/preview/library")
+    async def preview_library_on_timeline(
+            library_id: int = Query(ge=0),
+            n: int = Query(default=60, ge=1, le=10_000),
+            source_frames: int | None = Query(default=None, ge=1, le=10_000),
+            source_start: int = Query(default=0, ge=0),
+            source_end: int | None = Query(default=None, ge=1, le=10_000),
+            target_body: str = Query(default="unitree_h1", min_length=1,
+                                     max_length=128)):
+        """Put one target-retargeted Library clip on the live canvas."""
+        lib = state["library"]
+        emb = _require_body(target_body)
+        _require_library_id(lib, library_id)
+        if not emb.xml or not Path(emb.xml).is_file():
+            raise HTTPException(422, "selected body has no renderable mesh")
+        key = (int(library_id), int(n), source_frames, int(source_start),
+               source_end, target_body)
+        revision = state["viewer_revision"]
+
+        def work():
+            cache = state["timeline_previews"]
+            if key in cache:
+                trace = cache[key]
+                cache.move_to_end(key)
+            else:
+                seg = Segment(kind="library", library_id=library_id, n=n,
+                              source_frames=source_frames,
+                              source_start=source_start,
+                              source_end=source_end)
+                codes, name, _fam, root = _segment_codes(
+                    seg, POOL.equator, lib, target_body)
+                trace, _ = _preview_trace(codes, target_body, name,
+                                          root_t=root)
+                cache[key] = trace
+                cache.move_to_end(key)
+                while len(cache) > 20:
+                    cache.popitem(last=False)
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, target_body)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True}
+
+        return await POOL.run(work)
+
+    @app.post("/api/viewer/preview/timeline")
+    async def preview_uncompiled_timeline(req: TimelineRequest):
+        """Build one frame-accurate editor preview without generating gaps.
+
+        Library material is decoded normally. An unconstructed bridge contains
+        no motion yet, so its entire frame budget repeats the preceding pose and
+        root position. The live viewer can consequently run on the exact same
+        global frame clock as the timeline instead of looping individual clips.
+        """
+        lib = state["library"]
+        emb = _require_body(req.target_body)
+        if not emb.xml or not Path(emb.xml).is_file():
+            raise HTTPException(422, "selected body has no renderable mesh")
+        if any(seg.kind not in ("library", "gap") for seg in req.segments):
+            raise HTTPException(
+                422, "prompt and video segments must be generated before preview")
+        for seg in req.segments:
+            if seg.kind == "library":
+                _require_library_id(lib, seg.library_id)
+        if req.segments[0].kind == "gap":
+            raise HTTPException(422, "a bridge needs a clip on its left")
+        cache_key = req.model_dump_json(exclude={"render", "se3", "title"})
+        revision = state["viewer_revision"]
+
+        def work():
+            cache = state["edit_previews"]
+            if cache_key in cache:
+                trace = cache[cache_key]
+                cache.move_to_end(cache_key)
+            else:
+                chunks, world_paths, rotations = [], [], []
+                anchor_world = np.zeros(3, np.float64)
+                have_roots = True
+                root_path_locked = any(
+                    seg.world_position_m is not None or
+                    seg.world_end_position_m is not None
+                    for seg in req.segments if seg.kind == "library")
+                for seg in req.segments:
+                    if seg.kind == "gap":
+                        if not chunks:
+                            raise ValueError("a bridge needs a clip on its left")
+                        chunks.append(chunks[-1][-1:].repeat(seg.n, 1, 1))
+                        if have_roots:
+                            world_paths.append(np.repeat(
+                                anchor_world[None], seg.n, axis=0))
+                        rotations.append(np.repeat(
+                            rotations[-1][-1: ], seg.n, axis=0)
+                            if rotations else
+                            np.repeat(np.eye(3)[None], seg.n, axis=0))
+                        continue
+                    codes, _name, _fam, root = _segment_codes(
+                        seg, POOL.equator, lib, req.target_body)
+                    chunks.append(codes)
+                    if root is None:
+                        have_roots = False
+                        world_paths.clear()
+                    elif have_roots:
+                        absolute, _rotation_path = _segment_world_path(
+                            seg, root, len(codes), anchor_world)
+                        world_paths.append(absolute)
+                        anchor_world = absolute[-1].copy()
+                    rotations.append(_segment_rotation_path(seg, len(codes)))
+                codes = torch.cat(chunks, 0)
+                root_t, root_origin_m = (None, None)
+                if have_roots and world_paths:
+                    root_t, root_origin_m = _trace_root_from_world(
+                        np.concatenate(world_paths, 0))
+                trace, _ = _preview_trace(
+                    codes, req.target_body, req.title or "Timeline preview",
+                    root_t=root_t, fps=req.fps, root_origin_m=root_origin_m,
+                    root_rotation_delta=np.concatenate(rotations, 0),
+                    root_path_locked=root_path_locked)
+                cache[cache_key] = trace
+                cache.move_to_end(cache_key)
+                while len(cache) > 8:
+                    cache.popitem(last=False)
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, req.target_body)
+            state["live"].set_transport(frame=0, play=False)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True,
+                    "frozen_bridges": True}
+
+        return await POOL.run(work)
+
+    @app.post("/api/viewer/preview/motion/{motion_id}")
+    async def preview_motion_on_timeline(motion_id: int):
+        """Recall a generated Bridge (or any durable motion) for scrubbing."""
+        from ..embodiment import registry
+        from ..engine.trace import MotionTrace
+        with session() as s:
+            motion = s.get(Motion, motion_id)
+            if not motion:
+                raise HTTPException(404, "no such motion")
+            trace_path = Path(motion.trace_path)
+        if not trace_path.is_file():
+            raise HTTPException(404, "motion trace is missing")
+
+        revision = state["viewer_revision"]
+
+        def work():
+            trace = MotionTrace.load(trace_path)
+            emb = registry.load(trace.target)
+            if not emb.xml or not Path(emb.xml).is_file():
+                raise ValueError("motion body has no renderable mesh")
+            if revision != state["viewer_revision"]:
+                return {**state["live"].transport_state(), "stale": True}
+            state["live"].set_trace(trace, emb.xml, trace.target)
+            return {**state["live"].transport_state(),
+                    "title": trace.title, "preview": True}
+
+        return await POOL.run(work)
+
     @app.post("/api/jobs/play", status_code=202)
     async def play(req: PlayRequest):
         lib = state["library"]
@@ -655,7 +1468,7 @@ def create_app() -> FastAPI:
             def work():
                 eq = POOL.equator
                 seg = Segment(kind="library", library_id=req.library_id,
-                              n=req.n or lib.window)
+                              n=req.n or lib.frames(req.library_id))
                 codes, name, fam, root = _segment_codes(seg, eq, lib,
                                                         req.target_body)
                 return _finalize(codes, req.target_body, name, "library",
@@ -690,7 +1503,7 @@ def create_app() -> FastAPI:
                         fam = family_of(name)
                         chunks.append({"kind": "codes", "codes": codes,
                                        "root": root, "family": fam,
-                                       "generated": True})
+                                       "generated": True, "segment": seg})
                         names.append(name); families.append(fam)
                         if seg.text:
                             prompts.append(seg.text)
@@ -699,17 +1512,29 @@ def create_app() -> FastAPI:
                         seg, eq, lib, req.target_body)
                     chunks.append({"kind": "codes", "codes": codes,
                                    "root": root, "family": fam,
-                                   "generated": bool(seg.pins)})
+                                   "generated": bool(seg.pins),
+                                   "segment": seg})
                     names.append(name); families.append(fam)
                 # Resolve gaps between code chunks. Each source root path is
                 # first-frame anchored; bridge_root carries boundary velocity
                 # through generated interiors before re-anchoring the next.
                 from collections import Counter
                 from ..engine.timeline import bridge_root
-                out, roots, stages = [], [], []
+                out, roots, stages, rotation_edits = [], [], [], []
                 anchor = np.zeros(3)
                 have_root = all(c.get("root") is not None
                                 for c in chunks if c["kind"] == "codes")
+                has_world_edits = any(
+                    c["segment"].world_position_m is not None or
+                    c["segment"].world_rotation_wxyz is not None or
+                    c["segment"].world_end_position_m is not None or
+                    c["segment"].world_end_rotation_wxyz is not None
+                    for c in chunks if c["kind"] == "codes")
+                root_path_locked = any(
+                    c["segment"].world_position_m is not None or
+                    c["segment"].world_end_position_m is not None
+                    for c in chunks if c["kind"] == "codes")
+                anchor_world = np.zeros(3, np.float64)
                 for i, chunk in enumerate(chunks):
                     if chunk["kind"] == "codes":
                         val, root = chunk["codes"], chunk["root"]
@@ -718,9 +1543,18 @@ def create_app() -> FastAPI:
                                               1 if chunk["generated"] else 0,
                                               np.int32))
                         if have_root:
-                            absolute = anchor + root
-                            roots.append(absolute)
-                            anchor = absolute[-1]
+                            if has_world_edits:
+                                absolute, _rotation_path = _segment_world_path(
+                                    chunk["segment"], root, len(val),
+                                    anchor_world)
+                                roots.append(absolute)
+                                anchor_world = absolute[-1]
+                            else:
+                                absolute = anchor + root
+                                roots.append(absolute)
+                                anchor = absolute[-1]
+                        rotation_edits.append(_segment_rotation_path(
+                            chunk["segment"], len(val)))
                         continue
                     prev = out[-1] if out else None
                     nxt_chunk = next((v for v in chunks[i + 1:]
@@ -734,21 +1568,60 @@ def create_app() -> FastAPI:
                                              seg.pins))
                     stages.append(np.ones(seg.n, np.int32))
                     if have_root:
-                        gap_root, anchor = bridge_root(
-                            roots[-1], nxt_chunk["root"], seg.n)
-                        roots.append(gap_root)
+                        if has_world_edits:
+                            prev_cm = _world_path_to_root_cm(roots[-1])
+                            next_local, _ = _segment_world_path(
+                                nxt_chunk["segment"], nxt_chunk["root"],
+                                len(nxt_chunk["codes"]), np.zeros(3))
+                            next_cm = _world_path_to_root_cm(
+                                next_local - next_local[0])
+                            gap_cm, next_anchor_cm = bridge_root(
+                                prev_cm, next_cm, seg.n)
+                            gap_world = np.stack(
+                                [gap_cm[:, 2], gap_cm[:, 0], gap_cm[:, 1]],
+                                axis=1) / 100.0
+                            explicit = nxt_chunk["segment"].world_position_m
+                            if explicit is not None:
+                                target = np.asarray(explicit, np.float64)
+                                u = np.arange(1, seg.n + 1)[:, None] / (seg.n + 1)
+                                smooth = u * u * (3.0 - 2.0 * u)
+                                gap_world = (1.0 - smooth) * anchor_world + smooth * target
+                                anchor_world = target
+                            else:
+                                anchor_world = np.asarray(
+                                    [next_anchor_cm[2], next_anchor_cm[0],
+                                     next_anchor_cm[1]]) / 100.0
+                            roots.append(gap_world)
+                        else:
+                            gap_root, anchor = bridge_root(
+                                roots[-1], nxt_chunk["root"], seg.n)
+                            roots.append(gap_root)
+                    rotation_edits.append(np.repeat(
+                        rotation_edits[-1][-1: ], seg.n, axis=0))
                 codes = torch.cat(out, 0)
-                root_t = np.concatenate(roots, 0) if have_root and roots \
-                    else None
+                root_origin_m = None
+                if have_root and roots:
+                    if has_world_edits:
+                        root_t, root_origin_m = _trace_root_from_world(
+                            np.concatenate(roots, 0))
+                    else:
+                        root_t = np.concatenate(roots, 0)
+                else:
+                    root_t = None
                 title = req.title or " + ".join(names[:3])[:240]
                 family = Counter(families).most_common(1)[0][0] \
                     if families else "other"
                 kinds = {seg.kind for seg in req.segments}
                 source = "text_prompt" if kinds == {"prompt"} else \
-                    "video" if kinds == {"video"} else "edit"
+                    "video" if kinds == {"video"} else \
+                    "ai_mixed" if kinds & {"prompt", "video"} else "edit"
                 return _finalize(codes, req.target_body, title, source,
                                  render=req.render, fps=req.fps, se3=req.se3,
                                  root_t=root_t, family=family,
+                                 root_origin_m=root_origin_m,
+                                 root_rotation_delta=np.concatenate(
+                                     rotation_edits, 0),
+                                 root_path_locked=root_path_locked,
                                  prompt="; ".join(prompts) or None,
                                  stage=np.concatenate(stages))
             return await POOL.run(work)
@@ -963,15 +1836,27 @@ def create_app() -> FastAPI:
                          for w in path]}
 
     @app.get("/api/motions")
-    def motions(limit: int = Query(default=50, ge=1, le=200)):
+    def motions(limit: int = Query(default=50, ge=1, le=200),
+                ai_only: bool = Query(default=False)):
         with session() as s:
-            rows = s.query(Motion).order_by(Motion.id.desc()).limit(limit)
+            query = s.query(Motion)
+            if ai_only:
+                query = query.filter(Motion.source.in_(
+                    ("text_prompt", "video", "ai_mixed")))
+            rows = query.order_by(Motion.id.desc()).limit(limit)
             return {"motions": [
                 {"id": m.id, "title": m.title, "family": m.family,
                  "frames": m.n_frames, "source": m.source,
                  "gate_ratio": m.gate_ratio, "gate_passed": m.gate_passed,
                  "release_passed": release_passed(m.gate_passed, m.qc),
                  "trace": Path(m.trace_path).name,
+                 "prompt": m.prompt,
+                 "created_at": m.created_at.isoformat(),
+                 "ai_generated": bool((m.qc or {}).get(
+                     "generation", {}).get("ai_generated")) or
+                     m.source in ("text_prompt", "video", "ai_mixed"),
+                 "generation_method": (m.qc or {}).get(
+                     "generation", {}).get("method"),
                  "tokens": m.tokens}
                 for m in rows]}
 
@@ -1008,6 +1893,11 @@ def create_app() -> FastAPI:
     async def body_viewer_proxy(path: str):
         from ..config import CONFIG
         return await _viewer_proxy(CONFIG.viewer_ports[1], path)
+
+    @app.get("/source-viewer/{path:path}")
+    async def source_viewer_proxy(path: str):
+        from ..config import CONFIG
+        return await _viewer_proxy(CONFIG.viewer_ports[2], path)
 
     async def _viser_ws_proxy(ws: WebSocket, port: int):
         import websockets
@@ -1065,6 +1955,90 @@ def create_app() -> FastAPI:
     async def body_viser_ws(ws: WebSocket):
         from ..config import CONFIG
         await _viser_ws_proxy(ws, CONFIG.viewer_ports[1])
+
+    @app.websocket("/source-viser-ws")
+    async def source_viser_ws(ws: WebSocket):
+        from ..config import CONFIG
+        await _viser_ws_proxy(ws, CONFIG.viewer_ports[2])
+
+    # -------------------------------------------- BodyDataStudio proxy -----
+    # Keep the mature data worker isolated while presenting one same-origin
+    # AlphaMotion application. Rewriting its absolute asset/API paths lets the
+    # complete existing UI run below /data-studio-app/ without colliding with
+    # AlphaMotion's own /api namespace.
+    @app.get("/data-studio-app")
+    async def data_studio_slash():
+        return RedirectResponse("/data-studio-app/")
+
+    @app.api_route(
+        "/data-studio-app/{path:path}",
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    )
+    async def data_studio_proxy(request: Request, path: str):
+        from ..config import CONFIG
+        url = f"http://127.0.0.1:{CONFIG.data_studio_port}/{path}"
+        if request.url.query:
+            url += "?" + request.url.query
+        headers = {}
+        for key in ("content-type", "accept", "cookie"):
+            if key in request.headers:
+                headers[key] = request.headers[key]
+        body = await request.body()
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                upstream = await client.request(
+                    request.method, url, content=body,
+                    headers=headers)
+        except httpx.HTTPError as exc:
+            return Response(
+                content=f"Data Studio unavailable: {exc}", status_code=503,
+                media_type="text/plain")
+        content = upstream.content
+        content_type = upstream.headers.get("content-type", "")
+        # Rewrite executable/static documents only. JSON contains real source
+        # paths such as /media/...; changing those strings corrupts asset
+        # locators and makes the embedded library appear empty.
+        if any(kind in content_type for kind in (
+                "text/html", "text/css", "javascript")):
+            text = content.decode(upstream.encoding or "utf-8", errors="replace")
+            for prefix in ("api", "media", "assets", "vendor"):
+                text = text.replace(
+                    f"'/{prefix}/", f"'/data-studio-app/{prefix}/")
+                text = text.replace(
+                    f'"/{prefix}/', f'"/data-studio-app/{prefix}/')
+                text = text.replace(
+                    f'`/{prefix}/', f'`/data-studio-app/{prefix}/')
+            # BodyDataStudio keeps its two entry assets at the web root while
+            # its remaining module imports are relative to app.js.
+            text = text.replace('href="/style.css',
+                                'href="/data-studio-app/style.css')
+            text = text.replace('src="/app.js',
+                                'src="/data-studio-app/app.js')
+            text = text.replace("location.replace('/')",
+                                "location.replace('/data-studio-app/')")
+            content = text.encode("utf-8")
+        response_headers = {"cache-control": "no-cache"}
+        if "set-cookie" in upstream.headers:
+            response_headers["set-cookie"] = upstream.headers["set-cookie"]
+        should_sync = path == "api/augmentation-save"
+        if path == "api/process" and body:
+            try:
+                should_sync = json.loads(body).get("action") == "save"
+            except (ValueError, TypeError, AttributeError):
+                pass
+        if should_sync and 200 <= upstream.status_code < 300:
+            asyncio.create_task(_sync_data_studio_library())
+        return Response(content=content, status_code=upstream.status_code,
+                        media_type=content_type or None,
+                        headers=response_headers)
+
+    # Data Studio API responses intentionally keep canonical `/media/...`
+    # URLs.  When the application is embedded those URLs land on AlphaMotion,
+    # so proxy the media namespace as well.  Without this route generated GLB
+    # previews return 404 even though the files exist in BodyDataStudio.
+    @app.api_route("/media/{path:path}", methods=["GET", "HEAD"])
+    async def data_studio_media_proxy(request: Request, path: str):
+        return await data_studio_proxy(request, f"media/{path}")
 
     if FRONTEND.exists():
         app.mount("/", StaticFiles(directory=FRONTEND, html=True),

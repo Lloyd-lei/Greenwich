@@ -1,0 +1,552 @@
+{
+  "base_url": "http://127.0.0.1:7860",
+  "body": "unitree_h1",
+  "render": false,
+  "checks": {
+    "health": {
+      "height_cm": 140.4,
+      "joints": 20
+    },
+    "invalid_requests": "PASS",
+    "native": {
+      "motion_id": 1,
+      "frames": 60,
+      "trace": "3777f2a056_trace.npz",
+      "gate": {
+        "ratio": 2.2095,
+        "nll_original": 6.3399,
+        "nll_refined": 5.5471,
+        "per_token_ratio_min": 0.0179,
+        "passed": true,
+        "threshold": 0.7
+      },
+      "qc": {
+        "arm": {
+          "available": false
+        },
+        "limb_synergy": {
+          "before_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.9231,
+                "temporal_correlation": 0.3826,
+                "score": 0.867
+              },
+              "l_wrist": {
+                "direction_cosine": 0.359,
+                "temporal_correlation": 0.0052,
+                "score": 0.6176
+              },
+              "r_wrist": {
+                "direction_cosine": 0.645,
+                "temporal_correlation": 0.3255,
+                "score": 0.7666
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9974,
+                "temporal_correlation": 0.8182,
+                "score": 0.9673
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9874,
+                "temporal_correlation": 0.8565,
+                "score": 0.9708
+              }
+            },
+            "mean_score": 0.8378,
+            "min_score": 0.6176,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "after_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.914,
+                "temporal_correlation": 0.2618,
+                "score": 0.8429
+              },
+              "l_wrist": {
+                "direction_cosine": 0.3526,
+                "temporal_correlation": -0.08,
+                "score": 0.6006
+              },
+              "r_wrist": {
+                "direction_cosine": 0.6306,
+                "temporal_correlation": 0.2793,
+                "score": 0.7538
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9972,
+                "temporal_correlation": 0.8125,
+                "score": 0.9663
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9875,
+                "temporal_correlation": 0.8528,
+                "score": 0.9702
+              }
+            },
+            "mean_score": 0.8267,
+            "min_score": 0.6006,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "retained_ratio": 0.9868,
+          "passed": true
+        },
+        "continuity": {
+          "passed": true,
+          "pose_hold_fraction": 0.0,
+          "generated_glide_fraction": 0.0,
+          "joint_step_deg_p99": 41.401,
+          "joint_step_deg_max": 48.505,
+          "root_speed_m_s_p99": 2.309,
+          "root_speed_m_s_max": 2.459,
+          "scope": "kinematic continuity; not a physics rollout"
+        },
+        "release_passed": true
+      },
+      "refiner": {
+        "refiner": "global projection + temporal continuity repair",
+        "hold_repair": {
+          "repaired_frames": 0,
+          "holds_before": 0,
+          "holds_after": 0,
+          "rotation_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          },
+          "projection_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          },
+          "post_constraint_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          }
+        },
+        "branch_repair": {
+          "repaired_values": 0,
+          "large_jumps_before": 0,
+          "large_jumps_after": 0
+        },
+        "jump_repair": {
+          "repaired_frames": 0,
+          "repaired_joints": 0,
+          "large_jumps_before": 0
+        }
+      },
+      "family": "jacks",
+      "se3": [],
+      "release_passed": true,
+      "tokens": [
+        5466,
+        7913,
+        7682,
+        4562,
+        7788,
+        4557,
+        7687,
+        7913,
+        7788,
+        4557,
+        7793,
+        7788,
+        4557,
+        7788,
+        7687,
+        7793,
+        4582,
+        4562,
+        7788,
+        7793,
+        7683,
+        4557,
+        4663,
+        7788,
+        4558,
+        7793,
+        7788,
+        4557,
+        4557,
+        7788,
+        7687,
+        5341
+      ],
+      "viewer": "http://127.0.0.1:7871/"
+    },
+    "boundary_validation": "PASS",
+    "temporal_editor": {
+      "motion_id": 2,
+      "frames": 138,
+      "trace": "0951f13d48_trace.npz",
+      "gate": {
+        "ratio": 1.8972,
+        "nll_original": 4.4898,
+        "nll_refined": 3.8494,
+        "per_token_ratio_min": 0.1427,
+        "passed": true,
+        "threshold": 0.7
+      },
+      "qc": {
+        "arm": {
+          "available": false
+        },
+        "limb_synergy": {
+          "before_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.9316,
+                "temporal_correlation": 0.2629,
+                "score": 0.8488
+              },
+              "l_wrist": {
+                "direction_cosine": 0.2628,
+                "temporal_correlation": 0.3391,
+                "score": 0.6447
+              },
+              "r_wrist": {
+                "direction_cosine": 0.6194,
+                "temporal_correlation": 0.5715,
+                "score": 0.8013
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9973,
+                "temporal_correlation": 0.9088,
+                "score": 0.9832
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9908,
+                "temporal_correlation": 0.9069,
+                "score": 0.9807
+              }
+            },
+            "mean_score": 0.8517,
+            "min_score": 0.6447,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "after_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.9272,
+                "temporal_correlation": 0.3753,
+                "score": 0.867
+              },
+              "l_wrist": {
+                "direction_cosine": 0.2562,
+                "temporal_correlation": 0.2785,
+                "score": 0.632
+              },
+              "r_wrist": {
+                "direction_cosine": 0.6117,
+                "temporal_correlation": 0.416,
+                "score": 0.7716
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9971,
+                "temporal_correlation": 0.9022,
+                "score": 0.9819
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9905,
+                "temporal_correlation": 0.8969,
+                "score": 0.9789
+              }
+            },
+            "mean_score": 0.8463,
+            "min_score": 0.632,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "retained_ratio": 0.9937,
+          "passed": true
+        },
+        "continuity": {
+          "passed": true,
+          "pose_hold_fraction": 0.0,
+          "generated_glide_fraction": 0.0,
+          "joint_step_deg_p99": 35.979,
+          "joint_step_deg_max": 48.505,
+          "root_speed_m_s_p99": 2.879,
+          "root_speed_m_s_max": 2.988,
+          "scope": "kinematic continuity; not a physics rollout"
+        },
+        "release_passed": true
+      },
+      "refiner": {
+        "refiner": "global projection + temporal continuity repair",
+        "hold_repair": {
+          "repaired_frames": 8,
+          "holds_before": 5,
+          "holds_after": 0,
+          "rotation_pass": {
+            "repaired_frames": 8,
+            "holds_before": 5,
+            "holds_after": 0
+          },
+          "projection_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          },
+          "post_constraint_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          }
+        },
+        "branch_repair": {
+          "repaired_values": 0,
+          "large_jumps_before": 0,
+          "large_jumps_after": 0
+        },
+        "jump_repair": {
+          "repaired_frames": 0,
+          "repaired_joints": 0,
+          "large_jumps_before": 0
+        }
+      },
+      "family": "jacks",
+      "se3": [
+        {
+          "joint": 0,
+          "joint_name": "pelvis",
+          "frames": [
+            10,
+            20
+          ],
+          "position_error_cm": 0.0,
+          "rotation_error_deg": 0.081,
+          "root_translation": true
+        },
+        {
+          "joint": 19,
+          "joint_name": "right_elbow_link",
+          "frames": [
+            65,
+            75
+          ],
+          "position_error_cm": 0.0176,
+          "rotation_error_deg": 1.8666,
+          "root_translation": false
+        }
+      ],
+      "release_passed": true,
+      "tokens": [
+        8562,
+        7163,
+        7788,
+        8543,
+        7163,
+        8538,
+        8538,
+        7163,
+        7163,
+        8538,
+        7168,
+        7788,
+        8563,
+        7163,
+        8538,
+        7168,
+        8563,
+        8563,
+        7163,
+        7168,
+        8563,
+        7938,
+        7163,
+        7163,
+        8563,
+        7163,
+        7163,
+        8413,
+        8538,
+        7168,
+        7788,
+        7937
+      ],
+      "viewer": "http://127.0.0.1:7871/"
+    },
+    "atlas_jump": {
+      "motion_id": 3,
+      "frames": 122,
+      "trace": "7609705329_trace.npz",
+      "gate": {
+        "ratio": 9.99,
+        "nll_original": 6.9593,
+        "nll_refined": 4.2375,
+        "per_token_ratio_min": 0.3572,
+        "passed": true,
+        "threshold": 0.7
+      },
+      "qc": {
+        "arm": {
+          "available": false
+        },
+        "limb_synergy": {
+          "before_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.9268,
+                "temporal_correlation": 0.47,
+                "score": 0.8835
+              },
+              "l_wrist": {
+                "direction_cosine": 0.5365,
+                "temporal_correlation": 0.0819,
+                "score": 0.6887
+              },
+              "r_wrist": {
+                "direction_cosine": 0.7783,
+                "temporal_correlation": 0.2259,
+                "score": 0.7925
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9967,
+                "temporal_correlation": 0.6518,
+                "score": 0.938
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9882,
+                "temporal_correlation": 0.8668,
+                "score": 0.9729
+              }
+            },
+            "mean_score": 0.8551,
+            "min_score": 0.6887,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "after_refiner": {
+            "available": true,
+            "regions": {
+              "head": {
+                "direction_cosine": 0.9232,
+                "temporal_correlation": 0.4641,
+                "score": 0.8813
+              },
+              "l_wrist": {
+                "direction_cosine": 0.5337,
+                "temporal_correlation": 0.0857,
+                "score": 0.6885
+              },
+              "r_wrist": {
+                "direction_cosine": 0.7674,
+                "temporal_correlation": 0.1569,
+                "score": 0.7769
+              },
+              "l_ankle": {
+                "direction_cosine": 0.9968,
+                "temporal_correlation": 0.6553,
+                "score": 0.9386
+              },
+              "r_ankle": {
+                "direction_cosine": 0.9874,
+                "temporal_correlation": 0.8323,
+                "score": 0.9666
+              }
+            },
+            "mean_score": 0.8504,
+            "min_score": 0.6885,
+            "passed": true,
+            "scope": "root-relative kinematic limb synergy; not contact"
+          },
+          "retained_ratio": 0.9945,
+          "passed": true
+        },
+        "continuity": {
+          "passed": true,
+          "pose_hold_fraction": 0.0,
+          "generated_glide_fraction": 0.0,
+          "joint_step_deg_p99": 46.483,
+          "joint_step_deg_max": 48.593,
+          "root_speed_m_s_p99": 2.835,
+          "root_speed_m_s_max": 2.948,
+          "scope": "kinematic continuity; not a physics rollout"
+        },
+        "release_passed": true
+      },
+      "refiner": {
+        "refiner": "global projection + temporal continuity repair",
+        "hold_repair": {
+          "repaired_frames": 26,
+          "holds_before": 12,
+          "holds_after": 0,
+          "rotation_pass": {
+            "repaired_frames": 19,
+            "holds_before": 12,
+            "holds_after": 0
+          },
+          "projection_pass": {
+            "repaired_frames": 7,
+            "holds_before": 4,
+            "holds_after": 0
+          },
+          "post_constraint_pass": {
+            "repaired_frames": 0,
+            "holds_before": 0,
+            "holds_after": 0
+          }
+        },
+        "branch_repair": {
+          "repaired_values": 0,
+          "large_jumps_before": 1,
+          "large_jumps_after": 1
+        },
+        "jump_repair": {
+          "repaired_frames": 0,
+          "repaired_joints": 0,
+          "large_jumps_before": 0
+        }
+      },
+      "family": "jump",
+      "se3": [],
+      "release_passed": true,
+      "tokens": [
+        8567,
+        11063,
+        11588,
+        8588,
+        11058,
+        11588,
+        11588,
+        7933,
+        7938,
+        11588,
+        7938,
+        11713,
+        11588,
+        7938,
+        11588,
+        7938,
+        11588,
+        11588,
+        7963,
+        11688,
+        11588,
+        11588,
+        8558,
+        7813,
+        11588,
+        7938,
+        7808,
+        11588,
+        11588,
+        7938,
+        10938,
+        8587
+      ],
+      "viewer": "http://127.0.0.1:7871/"
+    }
+  }
+}

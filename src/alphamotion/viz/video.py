@@ -22,9 +22,10 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
     setup_gl_backend()
     import mujoco as mj
     from ..engine.descriptor import build_from_mjcf
-    from .kinematics import (apply_ground_safe_pose, first_frame_ground_height,
-                             free_root_address, joint_qpos_map,
-                             root_world_offsets, source_joint_map)
+    from .kinematics import (apply_ground_safe_pose,
+                             contact_stabilized_root_offsets,
+                             first_frame_ground_height, free_root_address,
+                             joint_qpos_map, source_joint_map)
     # vendor MJCFs ship the robot alone — no floor, no light — so offscreen
     # exports came out as a dim robot on black. Stage it: ground plane +
     # overhead light, and a bright headlight.
@@ -68,24 +69,11 @@ def render_trace(tr: MotionTrace, xml: str, body: str,
         apply_ground_safe_pose(model, data, tr, spec, tab, src_of, root_adr,
                                t, xyz)
 
-    # world translation. Preferred: the trace's DATA root trajectory (owner
-    # design — first frame = origin; trajectory continuity beats foot
-    # contact, foot skate/clip accepted). World-vector map measured on three
-    # GT windows: (x,y,z) Y-up -> (z,x,y) render Z-up (constant permutation;
-    # NOT @AX, NOT the rotation conjugation — those landed 80-100 deg off).
-    # Fallback: contact-derived stride odometry on the posed mesh.
-    from ..engine.odometry import foot_bodies, stance_offsets
-    off = np.zeros((tr.frames, 3))
-    if getattr(tr, "root_t", None) is not None:
-        off = root_world_offsets(tr.root_t, tr.frames)
-    elif root_adr >= 0:
-        fb = foot_bodies(model)
-        fw = np.zeros((tr.frames, len(fb), 3))
-        for t in range(tr.frames):
-            pose_at(t, (0.0, 0.0, 0.0))
-            for i, b in enumerate(fb):
-                fw[t, i] = data.xpos[b]
-        off[:, :2] = stance_offsets(fw)
+    # Start with source root motion, then correct it from the final target
+    # robot's measured stance feet. This preserves intent without accepting
+    # morphology-induced foot skate.
+    off, _contact_report = contact_stabilized_root_offsets(
+        model, data, tr, spec, tab, src_of, root_adr, ground_z)
 
     # camera: when the motion travels, look at the path's midpoint from the
     # SIDE (azimuth perpendicular to the net displacement) so the walk crosses

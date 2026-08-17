@@ -26,6 +26,9 @@ class MotionTrace:
     tokens: np.ndarray | None = None      # the 32 rainbow codes, when known
     joint_names: list | None = None       # q columns, for name-based render mapping
     root_t: np.ndarray | None = None      # [T,3] cm world root translation
+    root_origin_m: np.ndarray | None = None  # [3] absolute Z-up editor origin
+    contact_stabilized: bool = False      # root_t already solved on target feet
+    root_path_locked: bool = False        # editor XYZ endpoints are authoritative
 
     def __post_init__(self):
         T = len(self.q)
@@ -45,6 +48,9 @@ class MotionTrace:
             raise ValueError("joint_names must contain one name per q joint")
         if self.root_t is not None and np.asarray(self.root_t).shape != (T, 3):
             raise ValueError(f"root_t must be ({T},3)")
+        if (self.root_origin_m is not None
+                and np.asarray(self.root_origin_m).shape != (3,)):
+            raise ValueError("root_origin_m must contain three values")
         for name, value in (("q", self.q), ("rootR", self.rootR),
                             ("gp", self.gp), ("root_t", self.root_t)):
             if value is not None and not np.isfinite(value).all():
@@ -64,6 +70,12 @@ class MotionTrace:
             extra["joint_names"] = np.asarray(self.joint_names)
         if self.root_t is not None:
             extra["root_t"] = np.asarray(self.root_t, np.float32)
+        if self.root_origin_m is not None:
+            extra["root_origin_m"] = np.asarray(self.root_origin_m, np.float32)
+        extra["contact_stabilized"] = np.asarray(
+            bool(self.contact_stabilized), np.uint8)
+        extra["root_path_locked"] = np.asarray(
+            bool(self.root_path_locked), np.uint8)
         np.savez_compressed(path, q=self.q, rootR=self.rootR, gp=self.gp,
                             stage=self.stage.astype(np.int32),
                             fps=np.float32(self.fps),
@@ -84,4 +96,10 @@ class MotionTrace:
                    tokens=d["tokens"] if "tokens" in d else None,
                    joint_names=[str(x) for x in d["joint_names"]]
                    if "joint_names" in d else None,
-                   root_t=d["root_t"] if "root_t" in d else None)
+                   root_t=d["root_t"] if "root_t" in d else None,
+                   root_origin_m=d["root_origin_m"]
+                   if "root_origin_m" in d else None,
+                   contact_stabilized=bool(d["contact_stabilized"])
+                   if "contact_stabilized" in d else False,
+                   root_path_locked=bool(d["root_path_locked"])
+                   if "root_path_locked" in d else False)

@@ -25,6 +25,7 @@ dependencies = [
   "imageio-ffmpeg>=0.4.9",
   "viser>=1.0.16",
   "pillow>=10",
+  "smplx>=0.1.28",
   "typer>=0.9",
   "httpx>=0.27",
   "websockets>=12",
