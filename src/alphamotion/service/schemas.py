@@ -47,14 +47,20 @@ class Segment(APIModel):
     """One timeline block.
 
     kind=library : a curated clip (library_id), duration n (retiming);
+    kind=motion  : a durable generated/edited motion (motion_id), duration n;
     kind=gap     : Equator-generated bridge between neighbours, budget n;
-    kind=prompt  : GENMO text->motion (perception extra), text + n;
-    kind=video   : GENMO video->motion, asset path + n.
+    kind=prompt  : configured text->SMPL backend, text + n;
+    kind=video   : configured video->SMPL backend.  Uploaded source timing
+                   metadata determines n at the timeline FPS.
     """
-    kind: Literal["library", "gap", "prompt", "video"]
+    kind: Literal["library", "motion", "gap", "prompt", "video"]
     library_id: int | None = Field(default=None, ge=0)
+    motion_id: int | None = Field(default=None, gt=0)
     text: str | None = Field(default=None, max_length=500)
     video_asset: str | None = Field(default=None, max_length=4096)
+    source_video_frames: int | None = Field(default=None, ge=1)
+    source_video_fps: float | None = Field(default=None, gt=0.0, le=1000.0)
+    duration_seconds: float | None = Field(default=None, gt=0.0, le=3600.0)
     n: int = Field(default=60, ge=1, le=MAX_SEGMENT_FRAMES)
     # A split Library block keeps a non-destructive reference to the rendered
     # source material. ``source_start`` is inclusive and ``source_end`` is
@@ -94,14 +100,26 @@ class Segment(APIModel):
     def _required_source(self):
         if self.kind == "library" and self.library_id is None:
             raise ValueError("library segments require library_id")
+        if self.kind == "motion" and self.motion_id is None:
+            raise ValueError("motion segments require motion_id")
         if self.kind == "prompt" and not self.text:
             raise ValueError("prompt segments require text")
         if self.kind == "video" and not self.video_asset:
             raise ValueError("video segments require video_asset")
+        video_timing = (self.source_video_frames, self.source_video_fps,
+                        self.duration_seconds)
+        if any(value is not None for value in video_timing):
+            if self.kind != "video":
+                raise ValueError(
+                    "video timing metadata is only supported on video segments")
+            if any(value is None for value in video_timing):
+                raise ValueError(
+                    "video timing requires source frames, FPS, and duration")
         has_trim = (self.source_frames is not None or self.source_start != 0
                     or self.source_end is not None)
-        if has_trim and self.kind != "library":
-            raise ValueError("source ranges are only supported on library segments")
+        if has_trim and self.kind not in ("library", "motion"):
+            raise ValueError(
+                "source ranges are only supported on library or motion segments")
         if has_trim:
             if self.source_frames is None:
                 raise ValueError("source_frames is required for a source range")
@@ -137,6 +155,19 @@ class TimelineRequest(APIModel):
 
     @model_validator(mode="after")
     def _bounded_timeline(self):
+        # Video clips preserve their source duration.  Their output frame count
+        # follows the sequence FPS instead of the prompt generator's frame
+        # budget (for example, 10 seconds at 30 FPS becomes 300 frames even if
+        # the uploaded file itself contains 600 frames at 60 FPS).
+        for segment in self.segments:
+            if segment.kind != "video" or segment.duration_seconds is None:
+                continue
+            frames = int(round(segment.duration_seconds * self.fps))
+            if not 1 <= frames <= MAX_SEGMENT_FRAMES:
+                raise ValueError(
+                    "video duration at the timeline FPS must produce between "
+                    f"1 and {MAX_SEGMENT_FRAMES} frames")
+            segment.n = frames
         frames = sum(segment.n for segment in self.segments)
         if frames > MAX_TIMELINE_FRAMES:
             raise ValueError(

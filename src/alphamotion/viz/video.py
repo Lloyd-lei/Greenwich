@@ -16,6 +16,83 @@ from ..config import setup_gl_backend
 from ..engine.trace import MotionTrace
 
 
+def render_body_reference(xml: str, width: int = 360,
+                          height: int = 260) -> np.ndarray:
+    """Render a grounded, fixed-camera robot reference-pose thumbnail.
+
+    URDF/MJCF joint axes and neutral shoulder conventions differ between
+    vendors, so the model-authored ``qpos0`` is the only safe cross-robot
+    equivalent of a T-pose.  Forcing named shoulder joints to a shared angle
+    would put some bodies outside their limits or rotate them about the wrong
+    axis.
+    """
+    setup_gl_backend()
+    import mujoco as mj
+    from .kinematics import free_root_address, lowest_visual_z
+
+    model = mj.MjModel.from_xml_path(str(xml))
+
+    model.vis.global_.offwidth = max(model.vis.global_.offwidth, width)
+    model.vis.global_.offheight = max(model.vis.global_.offheight, height)
+    model.vis.headlight.ambient[:] = [0.38, 0.38, 0.38]
+    model.vis.headlight.diffuse[:] = [0.72, 0.72, 0.72]
+    model.vis.headlight.specular[:] = [0.16, 0.16, 0.16]
+    # Vendor models often include their own floor, sky and high-contrast
+    # materials.  Asset cards need a stable silhouette, so hide world geoms
+    # and use a neutral clay material for the robot without changing geometry.
+    for gid in range(model.ngeom):
+        if model.geom_bodyid[gid] == 0:
+            model.geom_rgba[gid, 3] = 0.0
+        else:
+            model.geom_matid[gid] = -1
+            model.geom_rgba[gid] = [0.72, 0.73, 0.76, 1.0]
+    data = mj.MjData(model)
+    data.qpos[:] = model.qpos0
+    mj.mj_forward(model, data)
+
+    root_adr = free_root_address(model)
+    low = lowest_visual_z(model, data)
+    if root_adr >= 0 and np.isfinite(low):
+        data.qpos[root_adr + 2] -= low
+        mj.mj_forward(model, data)
+
+    robot_geoms = []
+    for gid in range(model.ngeom):
+        name = mj.mj_id2name(model, mj.mjtObj.mjOBJ_GEOM, gid) or ""
+        if model.geom_bodyid[gid] != 0:
+            robot_geoms.append(gid)
+    if not robot_geoms:
+        raise ValueError("robot has no renderable geometry")
+
+    centers = np.asarray(data.geom_xpos[robot_geoms], np.float64)
+    radii = np.maximum(np.asarray(model.geom_rbound[robot_geoms], np.float64),
+                       0.015)
+    lo = np.min(centers - radii[:, None], axis=0)
+    hi = np.max(centers + radii[:, None], axis=0)
+    center = (lo + hi) * 0.5
+    span = np.maximum(hi - lo, 0.1)
+
+    cam = mj.MjvCamera()
+    cam.lookat[:] = center
+    cam.lookat[2] = lo[2] + span[2] * 0.52
+    cam.azimuth = 165.0
+    cam.elevation = -7.0
+    # Portrait fit is governed mainly by height, while the diagonal term
+    # leaves room for wide reference poses and long robot arms.
+    cam.distance = max(span[2] * 1.72, np.linalg.norm(span) * 1.16, 0.8)
+
+    renderer = mj.Renderer(model, height=height, width=width)
+    try:
+        renderer.update_scene(data, cam)
+        # Reference cards are an asset browser, not a simulation scene.  Hide
+        # vendor-specific skyboxes, floors and decorative world geometry so
+        # every robot is presented against the same dense-editor background.
+        renderer.scene.flags[mj.mjtRndFlag.mjRND_SKYBOX] = 0
+        return renderer.render().copy()
+    finally:
+        renderer.close()
+
+
 def render_trace(tr: MotionTrace, xml: str, body: str,
                  width: int = 640, height: int = 560,
                  follow: bool = True) -> np.ndarray:

@@ -193,9 +193,14 @@ class Library:
     def search(self, q: str = "", family: str = "", offset: int = 0,
                limit: int = 24, dataset: str = "", data_role: str = "",
                augmentation: str = "", label: str = "",
-               source: str = "") -> dict:
+               source: str = "", allowed_indices: set[int] | None = None,
+               allowed_asset_ids: set[str] | None = None) -> dict:
         rows = []
         for i in range(len(self.tokens)):
+            if (allowed_indices is not None or allowed_asset_ids is not None) \
+                    and i not in (allowed_indices or set()) \
+                    and str(self.asset_ids[i] or "") not in (allowed_asset_ids or set()):
+                continue
             if family and self.families[i] != family:
                 continue
             if dataset and self.datasets[i] != dataset:
@@ -407,10 +412,15 @@ class CompositeLibrary:
     def search(self, q: str = "", family: str = "", offset: int = 0,
                limit: int = 24, dataset: str = "", data_role: str = "",
                augmentation: str = "", label: str = "",
-               source: str = "") -> dict:
+               source: str = "", allowed_indices: set[int] | None = None,
+               allowed_asset_ids: set[str] | None = None) -> dict:
         rows = []
         query = q.lower()
         for i, name in enumerate(self.names):
+            if (allowed_indices is not None or allowed_asset_ids is not None) \
+                    and i not in (allowed_indices or set()) \
+                    and str(self.asset_ids[i] or "") not in (allowed_asset_ids or set()):
+                continue
             if family and self.families[i] != family:
                 continue
             if dataset and self.datasets[i] != dataset:

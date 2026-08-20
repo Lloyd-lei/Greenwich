@@ -14,6 +14,33 @@ import time
 import numpy as np
 
 
+def align_contact_frames(contact: np.ndarray,
+                         contact_type: np.ndarray | None,
+                         target_frames: int, *, label_fps: float = 0.0,
+                         target_fps: float = 0.0
+                         ) -> tuple[np.ndarray, np.ndarray]:
+    """Sample label channels onto the displayed motion's playback clock."""
+    states = np.asarray(contact, np.uint8)
+    if states.ndim != 2 or states.shape[1] != 4 or not len(states):
+        raise ValueError("foot contact state must have shape [T,4]")
+    types = (np.asarray(contact_type, np.uint8)
+             if contact_type is not None else np.zeros_like(states))
+    if types.shape != states.shape:
+        types = np.zeros_like(states)
+    target_frames = max(1, int(target_frames))
+    if len(states) == target_frames:
+        return states, types
+    if label_fps > 0 and target_fps > 0:
+        indices = np.rint(
+            np.arange(target_frames, dtype=np.float64)
+            * float(label_fps) / float(target_fps)).astype(np.int64)
+    else:
+        indices = np.rint(np.linspace(
+            0, len(states) - 1, target_frames)).astype(np.int64)
+    indices = np.clip(indices, 0, len(states) - 1)
+    return states[indices], types[indices]
+
+
 class LiveViewer:
     def __init__(self, port: int, *, loop_playback: bool = True,
                  autoplay: bool = True, on_playback_end=None):
@@ -37,6 +64,10 @@ class LiveViewer:
         self._pos = None
         self._wxyz = None
         self._skin_vertices = None
+        self._contact_positions = None
+        self._contact_states = None
+        self._contact_types = None
+        self._contact_handles: list = []
         self._fps = 30.0
         self._camera_center = np.array([0.0, 0.0, 0.7], np.float64)
         self._camera_radius = 1.25
@@ -265,10 +296,15 @@ class LiveViewer:
 
     # ------------------------------------------------------------- content --
     def _clear_content(self) -> None:
-        for handle in (*self._handles, *self._annotations):
+        for handle in (*self._handles, *self._annotations,
+                       *getattr(self, "_contact_handles", [])):
             handle.remove()
         self._handles = []
         self._annotations = []
+        self._contact_handles = []
+        self._contact_positions = None
+        self._contact_states = None
+        self._contact_types = None
 
     def set_trace(self, trace, xml: str, body: str) -> None:
         """Precompute mesh poses for the trace and swap the scene."""
@@ -397,6 +433,72 @@ class LiveViewer:
         self._show(0)
         self.reset_camera()
 
+    def set_contact_overlay(self, positions: np.ndarray, contact: np.ndarray,
+                            contact_type: np.ndarray | None = None, *,
+                            rendered: bool = False) -> None:
+        """Overlay four frame-aligned heel/forefoot contact markers.
+
+        BodyDataStudio stores row-vector positions in metres with Y up.  The
+        source SMPL-X skin is already converted to Viser's Z-up convention,
+        so the markers use the same basis conversion here.
+        """
+        from .kinematics import YUP_TO_ZUP
+
+        positions = np.asarray(positions, np.float32)
+        contact = np.asarray(contact, np.uint8)
+        if (positions.ndim != 3 or positions.shape[1:] != (4, 3)
+                or contact.shape != positions.shape[:2]):
+            raise ValueError(
+                "foot contact must provide positions [T,4,3] and contact [T,4]")
+        if self._skin_vertices is None:
+            raise ValueError("load an SMPL-X source before showing labels")
+        frames = min(len(self._skin_vertices), len(positions))
+        positions = positions[:frames]
+        if not rendered:
+            positions = positions @ YUP_TO_ZUP
+        contact = contact[:frames]
+        types = (np.asarray(contact_type, np.uint8)[:frames]
+                 if contact_type is not None else np.zeros_like(contact))
+        if types.shape != contact.shape:
+            types = np.zeros_like(contact)
+        with self._lock:
+            for handle in self._contact_handles:
+                handle.remove()
+            self._contact_handles = []
+            self._contact_positions = positions
+            self._contact_states = contact
+            self._contact_types = types
+            inactive = np.asarray([[78, 82, 91]], np.uint8)
+            names = ("left_heel", "left_forefoot",
+                     "right_heel", "right_forefoot")
+            for index, name in enumerate(names):
+                self._contact_handles.append(self.server.scene.add_point_cloud(
+                    f"/world/source/foot_contact/{name}",
+                    positions[0, index:index + 1], inactive,
+                    point_size=0.038, point_shape="circle"))
+            self._title.content += " · foot contact labels"
+        self._show(int(self._frame.value))
+
+    def set_skin_contact_overlay(
+            self, contact: np.ndarray, patch_indices: tuple[np.ndarray, ...],
+            contact_type: np.ndarray | None = None, *,
+            label_fps: float = 0.0) -> None:
+        """Attach contact states to heel/forefoot points on the visible skin."""
+        from .smplx_skin import sole_positions_from_skin
+
+        if self._skin_vertices is None:
+            raise ValueError("load an SMPL-X source before showing labels")
+        positions = sole_positions_from_skin(
+            self._skin_vertices, patch_indices)
+        # Lift the point centres just above the sole surface so the mesh does
+        # not occlude them while orbiting the camera.
+        positions[..., 2] += 0.012
+        states, types = align_contact_frames(
+            contact, contact_type, len(positions), label_fps=label_fps,
+            target_fps=self._fps)
+        self.set_contact_overlay(
+            positions, states, types, rendered=True)
+
     def set_body_preview(self, embodiment, semantics: dict | None = None) -> None:
         """Show one embodiment as a translucent mesh + labeled topology.
 
@@ -512,6 +614,19 @@ class LiveViewer:
                     for i, h in enumerate(self._handles):
                         h.position = self._pos[t, i]
                         h.wxyz = self._wxyz[t, i]
+                contact_positions = getattr(self, "_contact_positions", None)
+                contact_handles = getattr(self, "_contact_handles", [])
+                if contact_positions is not None and contact_handles:
+                    contact_frame = min(t, len(contact_positions) - 1)
+                    active = self._contact_states[contact_frame]
+                    inferred = self._contact_types[contact_frame]
+                    for index, handle in enumerate(contact_handles):
+                        handle.points = contact_positions[
+                            contact_frame, index:index + 1]
+                        color = ((255, 174, 45) if inferred[index] == 2
+                                 else (47, 220, 113) if active[index]
+                                 else (78, 82, 91))
+                        handle.colors = np.asarray([color], np.uint8)
                 if self._follow.value and self._frame_center is not None:
                     target = self._frame_center[t].astype(np.float64)
                     offset = self._follow_origin - target

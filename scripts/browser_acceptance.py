@@ -77,10 +77,28 @@ LAYOUT = r"""
     iframeWidth: f?.contentWindow?.innerWidth ?? null,
     iframeScrollWidth: f?.contentDocument?.documentElement?.scrollWidth ?? null,
     iframeRect: f?.getBoundingClientRect().toJSON() ?? null,
-    libraryCards: document.querySelectorAll('#libList .card').length,
+    libraryCards: document.querySelectorAll('#libList .libcard').length,
     bodies: document.querySelectorAll('#body option').length,
     viewportMessage: document.querySelector('#vpMsg')?.textContent || '',
   };
+})()
+"""
+
+OPEN_STUDIO = r"""
+(async()=>{
+  let projects=(await (await fetch('/api/projects')).json()).projects||[];
+  if(!projects.length){
+    const created=await (await fetch('/api/projects',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({name:'Browser Acceptance'})})).json();
+    projects=[created];
+  }
+  await openProject(projects[0].id);
+  activateView('studio');
+  const until=Date.now()+15000;
+  while(Date.now()<until){
+    if(document.querySelectorAll('#libList .libcard').length&&document.querySelectorAll('#body option').length)return true;
+    await new Promise(resolve=>setTimeout(resolve,100));
+  }
+  return false;
 })()
 """
 
@@ -188,6 +206,8 @@ def main():
                 })
                 cdp.call("Page.reload", {"ignoreCache": True})
             time.sleep(4)
+            assert cdp.evaluate(OPEN_STUDIO, await_promise=True), \
+                "Motion Studio did not finish loading"
             layout = cdp.evaluate(LAYOUT)
             assert layout["libraryCards"] > 0 and layout["bodies"] > 0, layout
             assert layout["overflowPx"] <= 1, layout

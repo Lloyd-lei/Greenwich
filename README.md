@@ -78,9 +78,9 @@ from packaged artifacts:
 
 - `alphamotion[labeling]` — live Qwen3 joint-name embeddings for ingesting
   URDFs with joint names outside the bundled cache.
-- Perception (video → motion, text → motion) rides an external GENMO
-  installation; see [docs/SDK.md](docs/SDK.md). Third-party model weights are
-  downloaded from their original sources, never re-hosted here.
+- Perception uses GENMO for both text → motion and video → world-grounded SMPL
+  motion; see [docs/SDK.md](docs/SDK.md). It runs in a separate environment,
+  and its third-party weights retain their upstream license.
 
 ## Honest limitations
 
@@ -102,6 +102,8 @@ Release acceptance and its exact commands are documented in
 [docs/PRODUCT_ACCEPTANCE.md](docs/PRODUCT_ACCEPTANCE.md).
 The implementation boundary and optional dependencies are recorded in
 [docs/RELEASE_SCOPE.md](docs/RELEASE_SCOPE.md).
+The current control-by-control usability audit and required smoke gate are in
+[docs/FUNCTIONAL_AUDIT.md](docs/FUNCTIONAL_AUDIT.md).
 
 ## License
 
