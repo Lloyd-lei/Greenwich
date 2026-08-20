@@ -125,8 +125,9 @@ def test_project_motion_preview_uses_bodydata_results_workspace():
     ).read_text()
 
     assert "function openProjectMotionPreview(item)" in frontend
+    assert "if(item.local_path){openDataStudioPreview(item,showLabels);return}" in frontend
     assert "type:'alphamotion:open-project-preview'" in frontend
-    assert "show_contacts:(item.labels||[]).includes('foot_contact')" in frontend
+    assert "show_contacts:showLabels" in frontend
 
 
 def test_project_media_delete_actions_are_exposed_in_both_studios():
@@ -140,3 +141,44 @@ def test_project_media_delete_actions_are_exposed_in_both_studios():
     assert "function deleteProjectMotionItems(items)" in frontend
     assert "Shared Library source assets will not be deleted." in frontend
     assert "method:'DELETE'" in frontend
+
+
+def test_project_uploads_report_destination_and_reset_file_inputs():
+    frontend = (
+        Path(__file__).parents[2]
+        / "src/alphamotion/assets/frontend/index.html"
+    ).read_text()
+
+    assert 'id="dsUploadStatus"' in frontend
+    assert "added to Project motions. Shared Library was not changed." in frontend
+    assert "added to Project robots. Shared Library was not changed." in frontend
+    assert "input.value=''" in frontend
+    assert "robot import timed out after 120 seconds" in frontend
+    assert "body.detail||text" in frontend
+    assert ("$('#dsMotionFile').onchange=e=>uploadProjectMotion("
+            "e.target.files[0]).catch(err=>alert(err.message))") not in frontend
+    assert ("$('#dsRobotFile').onchange=e=>uploadProjectRobot("
+            "e.target.files[0]).catch(err=>alert(err.message))") not in frontend
+
+
+def test_asset_preview_observer_ignores_missing_images():
+    frontend = (
+        Path(__file__).parents[2]
+        / "src/alphamotion/assets/frontend/index.html"
+    ).read_text()
+
+    assert "if(!(img instanceof HTMLImageElement)" in frontend
+
+
+def test_uploaded_robots_are_project_local_not_shared_starters():
+    service = (
+        Path(__file__).parents[2]
+        / "src/alphamotion/service/app.py"
+    ).read_text()
+
+    starter_endpoint = service.split(
+        '@app.get("/api/starter-bodies")', 1)[1].split(
+        '@app.get("/api/bodies/{name}/thumbnail.webp")', 1)[0]
+    assert 'return {"bodies": _starter_bodies()}' in starter_endpoint
+    assert 'project_id: str = ""' in service
+    assert 'state["projects"].add_media(project_id, bodies=[' in service

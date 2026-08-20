@@ -240,6 +240,14 @@ def create_app() -> FastAPI:
                         "renderable": bool(registry.load(n).xml)})
         return out
 
+    def _starter_bodies():
+        """Bundled bodies are shared; user uploads remain project-local."""
+        from ..embodiment import registry
+        renderable = registry.mesh_map()
+        return [{"name": name, "source": "bundled",
+                 "renderable": name in renderable}
+                for name in registry.bundled_names()]
+
     @app.get("/api/bodies")
     def bodies(project_id: str = Query(default="", max_length=32)):
         out = _all_bodies()
@@ -254,7 +262,7 @@ def create_app() -> FastAPI:
     @app.get("/api/starter-bodies")
     def starter_bodies():
         """Shared robot library offered from Data Studio, never Motion Studio."""
-        return {"bodies": _all_bodies()}
+        return {"bodies": _starter_bodies()}
 
     @app.get("/api/bodies/{name}/thumbnail.webp")
     def body_thumbnail(name: str):
@@ -667,7 +675,7 @@ def create_app() -> FastAPI:
                 "frames": lib.frames(index),
                 "state": "ready",
             })
-        available = {item["name"]: item for item in _all_bodies()}
+        available = {item["name"]: item for item in _starter_bodies()}
         bodies_to_add = []
         for name in payload.get("body_names") or []:
             if name not in available:
@@ -703,15 +711,8 @@ def create_app() -> FastAPI:
                     raise HTTPException(413, "SMPL upload exceeds 1 GiB")
                 handle.write(chunk)
         try:
-            with np.load(target, allow_pickle=True) as data:
-                if "poses" not in data.files:
-                    raise ValueError("NPZ has no poses array")
-                poses = np.asarray(data["poses"])
-                if poses.ndim != 2 or poses.shape[0] < 1 or poses.shape[1] < 72:
-                    raise ValueError(f"expected poses [frames, >=72], got {poses.shape}")
-                fps = next((float(np.asarray(data[key]).reshape(()))
-                            for key in ("mocap_framerate", "mocap_frame_rate", "fps")
-                            if key in data.files), 30.0)
+            from ..project_media import inspect_smpl_npz
+            motion_info = inspect_smpl_npz(target)
         except Exception as exc:
             target.unlink(missing_ok=True)
             raise HTTPException(422, f"invalid SMPL-family NPZ: {exc}") from exc
@@ -732,8 +733,7 @@ def create_app() -> FastAPI:
                 metadata_json=excluded.metadata_json""",
                 (asset_id, source, target.stem, "Uploads", "smplh_motion",
                  "npz", "direct", str(target), "", "{}", 1, "ready", total,
-                 json.dumps({"frames": int(poses.shape[0]), "fps": fps,
-                             "pose_dimensions": int(poses.shape[1]),
+                 json.dumps({**motion_info,
                              "project_id": project_id})))
             db.commit()
         finally:
@@ -741,7 +741,9 @@ def create_app() -> FastAPI:
         motion = {"asset_id": asset_id, "library_id": None,
                   "name": target.stem, "origin": "upload",
                   "source": source, "local_path": str(target),
-                  "frames": int(poses.shape[0]), "fps": fps,
+                  "frames": motion_info["frames"],
+                  "fps": motion_info["fps"],
+                  "representation": motion_info["representation"],
                   "state": "ready_for_data_studio"}
         state["projects"].add_media(project_id, motions=[motion])
         return motion
@@ -2566,7 +2568,8 @@ def create_app() -> FastAPI:
 
     # ----------------------------------------------------------- ingest -----
     @app.post("/api/bodies/ingest", status_code=202)
-    async def ingest_urdf(file: UploadFile = File(...), name: str = ""):
+    async def ingest_urdf(file: UploadFile = File(...), name: str = "",
+                          project_id: str = ""):
         import shutil
         import stat
         import zipfile
@@ -2575,6 +2578,11 @@ def create_app() -> FastAPI:
         suffix = Path(safe_name).suffix.lower()
         if suffix not in (".urdf", ".zip"):
             raise HTTPException(422, "body upload must be URDF or a ZIP package")
+        if project_id:
+            try:
+                state["projects"].get(project_id)
+            except KeyError as exc:
+                raise HTTPException(404, "project not found") from exc
         package = data_dir() / "uploads" / "bodies" / uuid.uuid4().hex
         package.mkdir(parents=True, exist_ok=False)
         uploaded = package / safe_name
@@ -2613,6 +2621,16 @@ def create_app() -> FastAPI:
                     raise HTTPException(
                         422, "ZIP package must contain exactly one URDF")
                 up = urdfs[0]
+            from ..project_media import missing_urdf_resources
+            missing = missing_urdf_resources(
+                up, extracted if suffix == ".zip" else package)
+            if missing:
+                examples = ", ".join(missing[:3])
+                more = f" and {len(missing) - 3} more" if len(missing) > 3 else ""
+                raise HTTPException(
+                    422, "URDF references missing mesh files: "
+                    f"{examples}{more}. Upload a ZIP containing the URDF "
+                    "and all referenced meshes.")
         except Exception:
             shutil.rmtree(package, ignore_errors=True)
             raise
@@ -2634,6 +2652,13 @@ def create_app() -> FastAPI:
                     row.limit_report = rep["limits"]
                     s.add(Asset(kind="urdf", path=str(up), bytes=total))
                     s.commit()
+                if project_id:
+                    state["projects"].add_media(project_id, bodies=[{
+                        "name": rep["name"], "origin": "upload",
+                        "source": "Project upload", "renderable": True,
+                        "joints": rep["joints"],
+                        "local_path": str(up),
+                    }])
                 return rep
             return await POOL.run(work)
         return {"job_id": _submit("ingest", {"file": safe_name}, run)}

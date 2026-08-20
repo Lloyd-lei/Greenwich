@@ -35,6 +35,28 @@ def safe_body_name(value: str) -> str:
     return name[:80].lower()
 
 
+def anchor_urdf_meshdir(spec, urdf_path: str | Path) -> None:
+    """Make converted MJCF mesh paths absolute without duplicating prefixes.
+
+    MuJoCo may report ``meshdir='meshes'`` while retaining URDF asset names
+    such as ``./meshes/pelvis.stl``.  Anchoring that meshdir directly would
+    resolve the asset as ``meshes/meshes/pelvis.stl``.  Remove the already
+    represented prefix from each asset before making meshdir absolute.
+    """
+    urdf_path = Path(urdf_path).resolve()
+    meshdir = Path(getattr(spec, "meshdir", "") or "")
+    if meshdir.is_absolute():
+        return
+    prefix = tuple(part for part in meshdir.parts if part not in ("", "."))
+    if prefix:
+        for mesh in spec.meshes:
+            value = Path(str(getattr(mesh, "file", "") or ""))
+            parts = tuple(part for part in value.parts if part not in ("", "."))
+            if parts[:len(prefix)] == prefix and len(parts) > len(prefix):
+                mesh.file = str(Path(*parts[len(prefix):]))
+    spec.meshdir = str((urdf_path.parent / meshdir).resolve())
+
+
 def urdf_to_mjcf(urdf_path: str | Path, name: str) -> Path:
     """URDF -> compilable MJCF with an injected floating base."""
     import mujoco
@@ -43,9 +65,7 @@ def urdf_to_mjcf(urdf_path: str | Path, name: str) -> Path:
     # URDF mesh references are relative to the URDF's own directory; the MJCF
     # we persist lives elsewhere, so anchor meshdir absolutely or the compile
     # of the saved file dies with "Error opening file 'meshes/...'"
-    md = getattr(spec, "meshdir", "") or ""
-    if not Path(md).is_absolute():
-        spec.meshdir = str((urdf_path.parent / md).resolve())
+    anchor_urdf_meshdir(spec, urdf_path)
     bodies = spec.bodies
     if len(bodies) < 2:
         raise ValueError("URDF has no articulated bodies")
