@@ -9,9 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import hashlib
 import json
 import os
 import sys
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -20,7 +22,7 @@ from pathlib import Path
 import httpx
 import numpy as np
 import torch
-from fastapi import (FastAPI, File, HTTPException, Query, Request, UploadFile,
+from fastapi import (FastAPI, File, Form, HTTPException, Query, Request, UploadFile,
                      WebSocket)
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -28,6 +30,7 @@ from fastapi.staticfiles import StaticFiles
 from ..atlas.families import FAMILIES, family_id, family_of
 from ..config import setup_gl_backend
 from ..paths import data_dir, results_dir
+from ..projects import ProjectStore
 from .db import Asset, AtlasEdge, Job, Motion, Skeleton, session
 from .quality import release_passed
 
@@ -41,6 +44,36 @@ from .schemas import JumpRequest, PlayRequest, Segment, TimelineRequest
 
 FRONTEND = Path(__file__).parent.parent / "assets" / "frontend"
 MODEL_FRAME_BATCH = 256
+BODY_THUMBNAIL_LOCK = threading.Lock()
+
+
+def _library_preview_key(lib, library_id: int) -> str:
+    """Content identity for hover previews, independent of list ordering."""
+    i = int(library_id)
+    # CompositeLibrary intentionally exposes only the metadata shared by all
+    # shards.  Source model/gender are useful salt for a standalone Library,
+    # but the asset ID remains the canonical identity when those optional
+    # arrays are unavailable.
+    def optional(name: str, default=None):
+        values = getattr(lib, name, None)
+        return values[i] if values is not None else default
+
+    identity = {
+        "renderer": "neutral-smplx-hover-v4",
+        "asset_id": lib.asset_ids[i],
+        "origin_id": lib.origin_ids[i],
+        "name": lib.names[i],
+        "dataset": lib.datasets[i],
+        "source": lib.sources[i],
+        "frames": lib.frames(i),
+        "model": optional("source_models"),
+        "gender": optional("source_genders", "neutral"),
+        "augmentation": lib.augmentations[i],
+        "augmentation_value": lib.augmentation_values[i],
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"),
+                         default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:20]
 
 def create_app() -> FastAPI:
     app = FastAPI(title="AlphaMotion", version="0.1.0")
@@ -50,10 +83,12 @@ def create_app() -> FastAPI:
                    "edit_previews": OrderedDict(),
                    "source_skins": OrderedDict(),
                    "source_codes": OrderedDict(),
+                   "motion_codes": OrderedDict(),
                    "sync_comparison": False,
                    "editor_gizmo": {"seq": 0, "active": False},
                    "viewer_revision": 0, "data_studio_sync": None,
-                   "data_studio": None, "data_studio_status": {}}
+                   "data_studio": None, "data_studio_status": {},
+                   "projects": ProjectStore(), "smpl_generations": {}}
 
     async def _sync_data_studio_library() -> None:
         """Publish saved derived clips, then atomically reload the ID space."""
@@ -118,6 +153,8 @@ def create_app() -> FastAPI:
         state["data_studio"] = DataStudioManager()
         state["data_studio_status"] = state["data_studio"].start()
         state["library"] = load_library()
+        if not state["projects"].list():
+            state["projects"].create("Untitled Motion Project")
         # An empty editor must also have an idle player. Motions are started
         # explicitly by the Studio transport after a timeline is populated.
         state["live"] = LiveViewer(CONFIG.viewer_ports[0], autoplay=False)
@@ -184,13 +221,14 @@ def create_app() -> FastAPI:
                 "data_studio": state.get("data_studio_status", {}),
                 "capabilities": {
                     "perception": perception["ready"],
+                    "perception_text": perception["text"],
+                    "perception_video": perception["video"],
                     "perception_detail": perception,
                     "temporal": True, "token_pins": True, "se3": True,
                     "mp4": True,
                     "render_bodies": sorted(registry.mesh_map())}}
 
-    @app.get("/api/bodies")
-    def bodies():
+    def _all_bodies():
         from ..embodiment import registry
         out = []
         renderable = registry.mesh_map()
@@ -200,7 +238,60 @@ def create_app() -> FastAPI:
         for n in registry.user_names():
             out.append({"name": n, "source": "user",
                         "renderable": bool(registry.load(n).xml)})
+        return out
+
+    @app.get("/api/bodies")
+    def bodies(project_id: str = Query(default="", max_length=32)):
+        out = _all_bodies()
+        if project_id:
+            try:
+                allowed = state["projects"].body_scope(project_id)
+            except KeyError as exc:
+                raise HTTPException(404, "project not found") from exc
+            out = [item for item in out if item["name"] in allowed]
         return {"bodies": out}
+
+    @app.get("/api/starter-bodies")
+    def starter_bodies():
+        """Shared robot library offered from Data Studio, never Motion Studio."""
+        return {"bodies": _all_bodies()}
+
+    @app.get("/api/bodies/{name}/thumbnail.webp")
+    def body_thumbnail(name: str):
+        """Cached mesh thumbnail in the model-authored reference pose."""
+        from ..embodiment import registry
+        from ..paths import cache_dir
+        try:
+            embodiment = registry.load(name)
+        except KeyError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        if not embodiment.xml:
+            raise HTTPException(404, "body does not include a renderable mesh")
+        xml = Path(embodiment.xml)
+        try:
+            stat = xml.stat()
+            identity = f"reference-v3|{name}|{xml.resolve()}|{stat.st_size}|{stat.st_mtime_ns}"
+        except OSError:
+            identity = f"reference-v3|{name}|{xml}"
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:20]
+        path = cache_dir() / "body_previews" / f"{digest}.webp"
+        if not path.is_file():
+            with BODY_THUMBNAIL_LOCK:
+                if not path.is_file():
+                    try:
+                        from PIL import Image
+                        from ..viz.video import render_body_reference
+                        pixels = render_body_reference(str(xml))
+                        path.parent.mkdir(parents=True, exist_ok=True)
+                        temporary = path.with_suffix(".tmp.webp")
+                        Image.fromarray(pixels).save(
+                            temporary, "WEBP", quality=88, method=4)
+                        os.replace(temporary, path)
+                    except Exception as exc:  # noqa: BLE001
+                        raise HTTPException(
+                            422, f"could not render body thumbnail: {exc}") from exc
+        return FileResponse(path, media_type="image/webp", headers={
+            "cache-control": "public, max-age=31536000, immutable"})
 
     @app.get("/api/bodies/{name}")
     def body_detail(name: str):
@@ -257,12 +348,597 @@ def create_app() -> FastAPI:
                 augmentation: str = Query(default="", max_length=64),
                 label: str = Query(default="", max_length=64),
                 source: str = Query(default="", max_length=100),
+                project_id: str = Query(default="", max_length=32),
                 offset: int = Query(default=0, ge=0),
                 limit: int = Query(default=24, ge=1, le=100)):
+        allowed_indices = allowed_assets = None
+        if project_id:
+            try:
+                allowed_indices, allowed_assets = state["projects"].motion_scope(
+                    project_id)
+            except KeyError as exc:
+                raise HTTPException(404, "project not found") from exc
+        return state["library"].search(
+            q=q, family=family, dataset=dataset, data_role=data_role,
+            augmentation=augmentation, label=label, source=source,
+            offset=offset, limit=limit, allowed_indices=allowed_indices,
+            allowed_asset_ids=allowed_assets)
+
+    @app.get("/api/starter-library")
+    def starter_library(q: str = Query(default="", max_length=200),
+                        family: str = Query(default="", max_length=32),
+                        dataset: str = Query(default="", max_length=64),
+                        data_role: str = Query(default="", max_length=32),
+                        augmentation: str = Query(default="", max_length=64),
+                        label: str = Query(default="", max_length=64),
+                        source: str = Query(default="", max_length=100),
+                        offset: int = Query(default=0, ge=0),
+                        limit: int = Query(default=24, ge=1, le=100)):
+        """Shared motion catalog shown only in Data Studio's import surface."""
         return state["library"].search(
             q=q, family=family, dataset=dataset, data_role=data_role,
             augmentation=augmentation, label=label, source=source,
             offset=offset, limit=limit)
+
+    # ---------------------------------------------------------- projects ---
+    @app.get("/api/projects")
+    def projects():
+        return {"projects": state["projects"].list()}
+
+    @app.post("/api/projects", status_code=201)
+    def create_project(payload: dict):
+        try:
+            return state["projects"].create(payload.get("name") or
+                                             "Untitled Motion Project")
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/projects/{project_id}")
+    def get_project(project_id: str):
+        try:
+            return state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+
+    @app.put("/api/projects/{project_id}")
+    def save_project(project_id: str, payload: dict):
+        try:
+            return state["projects"].save(project_id, payload)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/projects/{project_id}/media")
+    def project_media(project_id: str):
+        try:
+            project = state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        assets = project.get("assets") or {}
+        indices, asset_ids = state["projects"].motion_scope(project_id)
+        ready = state["library"].search(
+            offset=0, limit=100, allowed_indices=indices,
+            allowed_asset_ids=asset_ids)
+        ready_ids = {item.get("asset_id") for item in ready["items"]}
+        ready_indices = {item["id"] for item in ready["items"]}
+        from ..config import CONFIG
+        from ..data_studio import catalog_lookup
+        data_studio_lookup = catalog_lookup(CONFIG.data_studio_db)
+
+        def data_studio_asset_id(item: dict) -> str:
+            existing = str(item.get("data_studio_asset_id") or "")
+            if existing:
+                return existing
+            library_id = item.get("library_id")
+            if library_id is None:
+                return str(item.get("asset_id") or "")
+            index = int(library_id)
+            title = str(state["library"].names[index]).rsplit("__", 1)[-1]
+            source = str(state["library"].sources[index])
+            record = data_studio_lookup.get(
+                (source.casefold(), title.casefold()))
+            return str((record or {}).get("asset_id") or
+                       item.get("asset_id") or "")
+
+        motions = []
+        for item in assets.get("motions") or []:
+            value = dict(item)
+            library_id = value.get("library_id")
+            if library_id is not None:
+                try:
+                    index = int(library_id)
+                    if 0 <= index < len(state["library"]):
+                        lib = state["library"]
+                        value.update({
+                            "library_id": index,
+                            "name": lib.names[index],
+                            "family": lib.families[index],
+                            "dataset": lib.datasets[index],
+                            "source": lib.sources[index],
+                            "data_role": lib.data_roles[index],
+                            "augmentation": lib.augmentations[index],
+                            "augmentation_value":
+                                lib.augmentation_values[index],
+                            "labels": list(lib.labels[index]),
+                            "variant_count": lib.variant_counts[index],
+                            "frames": lib.frames(index),
+                        })
+                except (TypeError, ValueError):
+                    pass
+            value["data_studio_asset_id"] = data_studio_asset_id(value)
+            value["motion_ready"] = (value.get("library_id") in ready_indices or
+                                     value.get("asset_id") in ready_ids)
+            motions.append(value)
+        return {"project": {"id": project["id"], "name": project["name"]},
+                "motions": motions, "bodies": assets.get("bodies") or [],
+                "ready_motion_count": ready["total"]}
+
+    @app.delete("/api/projects/{project_id}/media")
+    def delete_project_media(project_id: str, kind: str,
+                             asset_id: str = "",
+                             library_id: int | None = None,
+                             name: str = ""):
+        try:
+            project, removed = state["projects"].remove_media(
+                project_id, kind=kind, asset_id=asset_id,
+                library_id=library_id, name=name)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {"ok": True, "removed": removed, "project": project}
+
+    @app.post("/api/projects/{project_id}/import-generated")
+    def import_generated_media(project_id: str, payload: dict):
+        """Add durable AI-generated motions to a project's local Media bin.
+
+        Generated traces live in the AlphaMotion store and do not need to be
+        re-indexed into the shared SMPL catalog before a user can review them.
+        The project keeps a reference only; deleting it never deletes the
+        generated trace itself.
+        """
+        ids = []
+        for raw in payload.get("motion_ids") or []:
+            try:
+                value = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if value > 0 and value not in ids:
+                ids.append(value)
+        if not ids:
+            raise HTTPException(422, "motion_ids must contain at least one id")
+        with session() as s:
+            rows = s.query(Motion).filter(Motion.id.in_(ids)).all()
+            by_id = {int(row.id): row for row in rows}
+            missing = [value for value in ids if value not in by_id]
+            if missing:
+                raise HTTPException(404, f"generated motion not found: {missing}")
+            motions = [{
+                "asset_id": f"generated:{row.id}",
+                "motion_id": int(row.id),
+                "name": row.title,
+                "origin": "ai_generated",
+                "source": row.source,
+                "family": row.family,
+                "frames": row.n_frames,
+                "fps": row.fps,
+                "state": "ready",
+                "generation_method": (row.qc or {}).get("generation", {}).get(
+                    "method", row.source),
+            } for row in (by_id[value] for value in ids)]
+        try:
+            project = state["projects"].add_media(
+                project_id, motions=motions,
+                bin_name=str(payload.get("bin_name") or "Generated motions"))
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        return {"ok": True, "imported": len(motions), "project": project,
+                "motions": motions}
+
+    @app.post("/api/projects/{project_id}/import-data-studio-results")
+    def import_data_studio_results(project_id: str, payload: dict):
+        """Attach durable Data Studio process outputs to Project Media."""
+        try:
+            state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        asset_ids = list(dict.fromkeys(
+            str(value).strip() for value in payload.get("asset_ids") or []
+            if str(value).strip()))
+        if not asset_ids:
+            raise HTTPException(422, "processed asset_ids are required")
+        labeled = {str(value).strip() for value in
+                   payload.get("labeled_asset_ids") or []}
+        from ..config import CONFIG
+        import sqlite3
+        db = sqlite3.connect(CONFIG.data_studio_db)
+        db.row_factory = sqlite3.Row
+        try:
+            placeholders = ",".join("?" for _ in asset_ids)
+            rows = db.execute(
+                f"SELECT * FROM assets WHERE id IN ({placeholders}) "
+                "AND kind='smplh_motion' AND status='ready'", asset_ids
+            ).fetchall()
+        finally:
+            db.close()
+        by_id = {str(row["id"]): row for row in rows}
+        missing = [value for value in asset_ids if value not in by_id]
+        if missing:
+            raise HTTPException(404, f"processed assets are not ready: {missing}")
+        motions = []
+        for asset_id in asset_ids:
+            row = by_id[asset_id]
+            try:
+                metadata = json.loads(row["metadata_json"] or "{}")
+            except (TypeError, ValueError):
+                metadata = {}
+            frames = int(metadata.get("frames") or 0)
+            fps = float(metadata.get("fps") or metadata.get("mocap_framerate")
+                        or 30.0)
+            path = Path(str(row["container"] or ""))
+            if path.is_file() and (not frames or not metadata.get("fps")):
+                try:
+                    with np.load(path, allow_pickle=False) as archive:
+                        sequence = (archive["poses"] if "poses" in archive else
+                                    archive["local_rot6d"] if "local_rot6d" in archive
+                                    else None)
+                        if sequence is not None:
+                            frames = int(len(sequence))
+                        for key in ("mocap_framerate", "fps"):
+                            if key in archive:
+                                fps = float(np.asarray(archive[key]).reshape(-1)[0])
+                                break
+                except (OSError, ValueError, KeyError):
+                    pass
+            motions.append({
+                "asset_id": asset_id,
+                "data_studio_asset_id": asset_id,
+                "name": str(row["title"]),
+                "origin": "data_studio_processed",
+                "source": str(row["source"]),
+                "folder": str(row["folder"]),
+                "local_path": str(row["container"]),
+                "frames": frames,
+                "fps": fps,
+                "state": "ready",
+                "labels": ["foot_contact"] if asset_id in labeled else [],
+                "process_run_id": str(payload.get("run_id") or ""),
+            })
+        project = state["projects"].add_media(
+            project_id, motions=motions, bin_name="Processed in Data Studio")
+        return {"ok": True, "imported": len(motions), "motions": motions,
+                "project": project}
+
+    @app.post("/api/motions/{motion_id}/share")
+    def share_generated_motion(motion_id: int):
+        """Mark a generated motion for the shared Data Studio catalog.
+
+        The catalog synchronizer can publish the trace on its next pass.  The
+        explicit marker makes sharing idempotent and visible immediately in
+        the Generated motions panel.
+        """
+        with session() as s:
+            row = s.get(Motion, int(motion_id))
+            if row is None:
+                raise HTTPException(404, "generated motion not found")
+            qc = dict(row.qc or {})
+            generation = dict(qc.get("generation") or {})
+            generation["shared_to_library"] = True
+            qc["generation"] = generation
+            row.qc = qc
+            s.commit()
+            return {"ok": True, "motion_id": row.id, "shared": True,
+                    "title": row.title}
+
+    @app.post("/api/projects/{project_id}/import")
+    def import_project_media(project_id: str, payload: dict):
+        lib = state["library"]
+        from ..config import CONFIG
+        from ..data_studio import catalog_lookup
+        data_studio_lookup = catalog_lookup(CONFIG.data_studio_db)
+        motions = []
+        for raw in payload.get("library_ids") or []:
+            try:
+                index = int(raw)
+                if index < 0 or index >= len(lib):
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise HTTPException(422, f"invalid library id: {raw}")
+            title = str(lib.names[index]).rsplit("__", 1)[-1]
+            record = data_studio_lookup.get(
+                (str(lib.sources[index]).casefold(), title.casefold()))
+            motions.append({
+                "library_id": index,
+                "asset_id": lib.asset_ids[index] or f"library:{index}",
+                "data_studio_asset_id": str(
+                    (record or {}).get("asset_id") or
+                    lib.asset_ids[index] or f"library:{index}"),
+                "name": lib.names[index],
+                "origin": "starter",
+                "family": lib.families[index],
+                "dataset": lib.datasets[index],
+                "source": lib.sources[index],
+                "data_role": lib.data_roles[index],
+                "augmentation": lib.augmentations[index],
+                "augmentation_value": lib.augmentation_values[index],
+                "labels": list(lib.labels[index]),
+                "variant_count": lib.variant_counts[index],
+                "frames": lib.frames(index),
+                "state": "ready",
+            })
+        available = {item["name"]: item for item in _all_bodies()}
+        bodies_to_add = []
+        for name in payload.get("body_names") or []:
+            if name not in available:
+                raise HTTPException(422, f"unknown body: {name}")
+            bodies_to_add.append({**available[name], "origin": "starter"})
+        try:
+            return state["projects"].add_media(
+                project_id, motions=motions, bodies=bodies_to_add,
+                bin_name=str(payload.get("bin_name") or "Imported from library"))
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+
+    @app.post("/api/projects/{project_id}/upload-smpl", status_code=201)
+    async def upload_project_smpl(project_id: str,
+                                  file: UploadFile = File(...)):
+        """Store and register a project-local SMPL-family NPZ for processing."""
+        try:
+            state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        safe_name = Path(file.filename or "motion.npz").name
+        if Path(safe_name).suffix.lower() != ".npz":
+            raise HTTPException(422, "SMPL upload must be an NPZ file")
+        target = state["projects"].media_dir(project_id, "motions") / safe_name
+        if target.exists():
+            target = target.with_name(f"{target.stem}-{uuid.uuid4().hex[:8]}.npz")
+        total = 0
+        with target.open("wb") as handle:
+            while chunk := await file.read(1024 * 1024):
+                total += len(chunk)
+                if total > 1024 * 1024 * 1024:
+                    target.unlink(missing_ok=True)
+                    raise HTTPException(413, "SMPL upload exceeds 1 GiB")
+                handle.write(chunk)
+        try:
+            with np.load(target, allow_pickle=True) as data:
+                if "poses" not in data.files:
+                    raise ValueError("NPZ has no poses array")
+                poses = np.asarray(data["poses"])
+                if poses.ndim != 2 or poses.shape[0] < 1 or poses.shape[1] < 72:
+                    raise ValueError(f"expected poses [frames, >=72], got {poses.shape}")
+                fps = next((float(np.asarray(data[key]).reshape(()))
+                            for key in ("mocap_framerate", "mocap_frame_rate", "fps")
+                            if key in data.files), 30.0)
+        except Exception as exc:
+            target.unlink(missing_ok=True)
+            raise HTTPException(422, f"invalid SMPL-family NPZ: {exc}") from exc
+        source = f"Project / {project_id}"
+        locator = f"direct|{target}|"
+        asset_id = hashlib.sha1(f"{source}|{locator}".encode()).hexdigest()[:24]
+        from ..config import CONFIG
+        import sqlite3
+        db = sqlite3.connect(CONFIG.data_studio_db)
+        try:
+            db.execute(
+                """INSERT INTO assets
+                (id,source,title,folder,kind,format,locator_type,container,
+                 inner_path,aux_json,animated,status,size,metadata_json)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET title=excluded.title,
+                container=excluded.container,size=excluded.size,
+                metadata_json=excluded.metadata_json""",
+                (asset_id, source, target.stem, "Uploads", "smplh_motion",
+                 "npz", "direct", str(target), "", "{}", 1, "ready", total,
+                 json.dumps({"frames": int(poses.shape[0]), "fps": fps,
+                             "pose_dimensions": int(poses.shape[1]),
+                             "project_id": project_id})))
+            db.commit()
+        finally:
+            db.close()
+        motion = {"asset_id": asset_id, "library_id": None,
+                  "name": target.stem, "origin": "upload",
+                  "source": source, "local_path": str(target),
+                  "frames": int(poses.shape[0]), "fps": fps,
+                  "state": "ready_for_data_studio"}
+        state["projects"].add_media(project_id, motions=[motion])
+        return motion
+
+    @app.post("/api/projects/{project_id}/generate-smpl", status_code=202)
+    async def generate_project_smpl(project_id: str, payload: dict):
+        """Run GENMO into a project-local SMPL asset, never a robot trace."""
+        try:
+            state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        mode = str(payload.get("mode") or "prompt")
+        text = str(payload.get("text") or "").strip()
+        video_asset = str(payload.get("video_asset") or "").strip()
+        frames = max(15, min(10_000, int(payload.get("frames") or 120)))
+        if mode == "prompt" and not text:
+            raise HTTPException(422, "prompt text is required")
+        if mode not in ("prompt", "video"):
+            raise HTTPException(422, "mode must be prompt or video")
+
+        async def run(_id):
+            def work():
+                from ..perception.genmo import (global_to_local_rot6d,
+                                                motion_from_prompt,
+                                                motion_from_video)
+                if mode == "prompt":
+                    global6d, root_cm = motion_from_prompt(text, frames / 30.0)
+                    title = text[:120]
+                else:
+                    root = (data_dir() / "uploads" / "videos").resolve()
+                    video = (root / Path(video_asset).name).resolve()
+                    if not video.is_relative_to(root) or not video.is_file():
+                        raise ValueError("video asset is not a registered upload")
+                    global6d, root_cm = motion_from_video(str(video), frames)
+                    title = Path(video_asset).stem[:120]
+                local6d = global_to_local_rot6d(global6d).cpu().numpy()
+                generation_id = uuid.uuid4().hex[:16]
+                target_root = data_dir() / "generated_smpl" / project_id
+                target_root.mkdir(parents=True, exist_ok=True)
+                target = target_root / f"{generation_id}.npz"
+                np.savez_compressed(target, local_rot6d=local6d.astype(np.float16),
+                                    root_cm=np.asarray(root_cm, np.float32),
+                                    hand_pose=np.zeros((len(local6d), 0), np.float16),
+                                    betas=np.zeros(10, np.float32), gender=np.asarray(0, np.uint8),
+                                    model_family=np.asarray(0, np.uint8), fps=np.asarray(30.0))
+                asset_id = hashlib.sha1(str(target).encode()).hexdigest()[:24]
+                motion = {"asset_id": asset_id, "name": f"GENMO · {title}",
+                          "origin": "genmo", "source": "GENMO", "local_path": str(target),
+                          "data_studio_asset_id": asset_id,
+                          "frames": len(local6d), "fps": 30.0, "state": "ready",
+                          "generation_id": generation_id, "project_id": project_id,
+                          "prompt": text if mode == "prompt" else "",
+                          "imported": False, "shared": False,
+                          "generation_method": "text-to-smpl" if mode == "prompt" else "video-to-smpl"}
+                state["smpl_generations"][generation_id] = motion
+                target.with_suffix(".json").write_text(
+                    json.dumps(motion, ensure_ascii=False, indent=2), encoding="utf-8")
+                return motion
+            return await POOL.run(work)
+        return {"job_id": _submit("generate-smpl", {"project_id": project_id, **payload}, run)}
+
+    def _project_smpl_generations(project_id: str) -> list[dict]:
+        root = data_dir() / "generated_smpl" / project_id
+        result = []
+        if root.is_dir():
+            for path in root.glob("*.json"):
+                try:
+                    item = json.loads(path.read_text(encoding="utf-8"))
+                    if Path(item.get("local_path", "")).is_file():
+                        state["smpl_generations"][item["generation_id"]] = item
+                        result.append(item)
+                except (OSError, ValueError, KeyError, TypeError):
+                    continue
+        return sorted(result, key=lambda item: item["generation_id"], reverse=True)
+
+    @app.get("/api/projects/{project_id}/smpl-generations")
+    def list_project_smpl_generations(project_id: str):
+        try:
+            state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        return {"generations": _project_smpl_generations(project_id)}
+
+    def _smpl_generation(generation_id: str, project_id: str = "") -> dict:
+        item = state["smpl_generations"].get(generation_id)
+        if item is None and project_id:
+            _project_smpl_generations(project_id)
+            item = state["smpl_generations"].get(generation_id)
+        if item is None or (project_id and item.get("project_id") != project_id):
+            raise HTTPException(404, "generated SMPL motion not found")
+        return item
+
+    def _preview_smpl_file(path: Path, name: str, fps: float = 30.0):
+        def work():
+            with np.load(path, allow_pickle=False) as raw:
+                if "local_rot6d" in raw:
+                    local = np.asarray(raw["local_rot6d"], np.float32)
+                    root = np.asarray(raw["root_cm"], np.float32)
+                    hands = np.asarray(raw["hand_pose"], np.float32) \
+                        if "hand_pose" in raw else np.empty((len(local), 0))
+                    betas = np.asarray(raw["betas"], np.float32) \
+                        if "betas" in raw else np.zeros(10, np.float32)
+                else:
+                    from scipy.spatial.transform import Rotation
+                    poses = np.asarray(raw["poses"], np.float32)
+                    trans = np.asarray(raw["trans"], np.float32)
+                    aa = poses[:, :66].reshape(-1, 22, 3)
+                    matrices = Rotation.from_rotvec(aa.reshape(-1, 3)).as_matrix(
+                    ).reshape(len(aa), 22, 3, 3)
+                    basis = Rotation.from_euler("x", -90, degrees=True).as_matrix()
+                    matrices[:, 0] = basis @ matrices[:, 0]
+                    local = matrices[..., :, :2].transpose(0, 1, 3, 2).reshape(
+                        len(aa), 22, 6).astype(np.float32)
+                    root = ((trans @ basis.T) - (trans @ basis.T)[:1]) * 100.0
+                    hands = poses[:, 66:156] if poses.shape[1] >= 156 else \
+                        np.empty((len(poses), 0))
+                    betas = np.asarray(raw["betas"], np.float32)[:10] \
+                        if "betas" in raw else np.zeros(10, np.float32)
+            from ..engine.spatial import build_global
+            from ..viz.smplx_skin import skin_global_rot6d
+            spec, _dof, _rest = POOL.human
+            rotations, _pos, _reach = build_global(
+                torch.from_numpy(local), spec, "cpu")
+            vertices, faces = skin_global_rot6d(
+                rotations.numpy(), spec.parents, root_cm=root,
+                hand_pose=hands if hands.size else None,
+                betas=betas, device=POOL.device)
+            state["source_live"].set_smplx_skin(
+                vertices, faces, name, fps=float(fps))
+            return {**state["source_live"].transport_state(), "name": name,
+                    "skin": "neutral SMPL-X", "source_kind": "project-native"}
+        return work
+
+    @app.post("/api/smpl-generations/{generation_id}/preview")
+    async def preview_smpl_generation(generation_id: str):
+        item = _smpl_generation(generation_id)
+        result = await POOL.run(_preview_smpl_file(
+            Path(item["local_path"]), item["name"], float(item.get("fps", 30.0))))
+        return {**result, **item}
+
+    @app.post("/api/projects/{project_id}/media/preview")
+    async def preview_project_media(project_id: str, asset_id: str):
+        try:
+            project = state["projects"].get(project_id)
+        except KeyError as exc:
+            raise HTTPException(404, "project not found") from exc
+        item = next((motion for motion in
+                     (project.get("assets") or {}).get("motions", [])
+                     if str(motion.get("asset_id")) == asset_id), None)
+        if item is None or not item.get("local_path"):
+            raise HTTPException(404, "project motion has no local SMPL source")
+        path = Path(item["local_path"])
+        if not path.is_file():
+            raise HTTPException(404, "project motion source file is missing")
+        return await POOL.run(_preview_smpl_file(
+            path, item.get("name") or path.stem, float(item.get("fps", 30.0))))
+
+    @app.post("/api/projects/{project_id}/smpl-generations/{generation_id}/commit")
+    async def commit_smpl_generation(project_id: str, generation_id: str,
+                                     payload: dict):
+        item = _smpl_generation(generation_id, project_id)
+        import_media = bool(payload.get("import_to_media"))
+        share_library = bool(payload.get("share_to_library"))
+        if not import_media and not share_library:
+            raise HTTPException(422, "select Import to Media, Share to Library, or both")
+        if import_media and not item.get("imported"):
+            state["projects"].add_media(
+                project_id, motions=[item], bin_name="GENMO SMPL")
+            item["imported"] = True
+        if share_library and not item.get("shared"):
+            from ..config import CONFIG
+            import sqlite3
+            metadata = {"frames": item["frames"], "fps": item["fps"],
+                        "project_id": project_id, "augmentation_type": "generated",
+                        "augmentation_saved": True, "augmentation_draft": False,
+                        "generation_method": item["generation_method"]}
+            db = sqlite3.connect(CONFIG.data_studio_db)
+            try:
+                db.execute("""INSERT INTO assets
+                  (id,source,title,folder,kind,format,locator_type,container,
+                   inner_path,aux_json,animated,status,size,metadata_json)
+                  VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  ON CONFLICT(id) DO UPDATE SET status='ready',
+                  metadata_json=excluded.metadata_json""",
+                  (item["asset_id"], "GENMO Shared", item["name"], "Generated",
+                   "smplh_motion", "npz", "direct", item["local_path"], "", "{}",
+                   1, "ready", Path(item["local_path"]).stat().st_size,
+                   json.dumps(metadata)))
+                db.commit()
+            finally:
+                db.close()
+            item["shared"] = True
+            asyncio.create_task(_sync_data_studio_library())
+        state["smpl_generations"][generation_id] = item
+        Path(item["local_path"]).with_suffix(".json").write_text(
+            json.dumps(item, ensure_ascii=False, indent=2), encoding="utf-8")
+        return {"ok": True, "generation": item}
 
     @app.get("/api/library-datasets")
     def library_datasets():
@@ -392,6 +1068,60 @@ def create_app() -> FastAPI:
             "record": record, "origin": origin, "variants": variants,
         }
 
+    def data_studio_target_id(library_id: int) -> str:
+        detail = library_detail(library_id)
+        record = detail.get("record") or {}
+        if not record:
+            return ""
+        from ..config import CONFIG
+        primary = Path(CONFIG.data_studio_db)
+        if not primary.is_file():
+            return ""
+        import sqlite3
+        db = None
+        try:
+            db = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
+            row = db.execute(
+                "SELECT id FROM assets WHERE title=? AND kind='smplh_motion' "
+                "AND animated=1 AND status='ready' ORDER BY CASE WHEN "
+                "source=? THEN 0 ELSE 1 END LIMIT 1",
+                (record.get("title", ""), record.get("source", "")),
+            ).fetchone()
+            return str(row[0]) if row else ""
+        except sqlite3.Error:
+            return ""
+        finally:
+            if db is not None:
+                db.close()
+
+    async def _data_studio_contact_labels(target_id: str) -> dict:
+        """Read one frame-aligned four-effector contact sidecar."""
+        if not target_id:
+            raise HTTPException(409, "contact labels are not indexed yet")
+        from ..config import CONFIG
+        base = f"http://127.0.0.1:{CONFIG.data_studio_port}"
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                response = await client.get(
+                    base + "/api/contact-labels", params={"id": target_id})
+                payload = response.json()
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(503, "Data Studio labels unavailable") from exc
+        if response.status_code >= 400:
+            raise HTTPException(response.status_code,
+                                payload.get("error", "label lookup failed"))
+        if payload.get("status") != "ready" or not payload.get("labels"):
+            raise HTTPException(404, "clip has no foot-contact labels")
+        return payload["labels"]
+
+    @app.get("/api/library/{library_id}/foot-contact")
+    async def library_foot_contact(library_id: int):
+        """Read the frame-aligned four-effector contact sidecar."""
+        labels = await _data_studio_contact_labels(
+            data_studio_target_id(library_id))
+        return {"ok": True, "library_id": library_id,
+                "labels": labels}
+
     @app.post("/api/library/{library_id}/label-foot-contact")
     async def library_label_foot_contact(library_id: int):
         """Run BodyDataStudio labeling, then expose its sidecar in Motion."""
@@ -400,26 +1130,7 @@ def create_app() -> FastAPI:
         if not record:
             raise HTTPException(409, "clip has no Data Studio record")
         from ..config import CONFIG
-        primary = Path(CONFIG.data_studio_db)
-        import sqlite3
-        target_id = ""
-        if primary.is_file():
-            try:
-                db = sqlite3.connect(f"file:{primary}?mode=ro", uri=True)
-                row = db.execute(
-                    "SELECT id FROM assets WHERE title=? AND kind='smplh_motion' "
-                    "AND animated=1 AND status='ready' ORDER BY CASE WHEN "
-                    "source=? THEN 0 ELSE 1 END LIMIT 1",
-                    (record.get("title", ""), record.get("source", "")),
-                ).fetchone()
-                target_id = str(row[0]) if row else ""
-            except sqlite3.Error:
-                target_id = ""
-            finally:
-                try:
-                    db.close()
-                except UnboundLocalError:
-                    pass
+        target_id = data_studio_target_id(library_id)
         if not target_id:
             raise HTTPException(
                 409, "clip is still being indexed by Data Studio; retry shortly")
@@ -456,6 +1167,7 @@ def create_app() -> FastAPI:
         lib = state["library"]
         if library_id < 0 or library_id >= len(lib):
             raise HTTPException(404, "no such library clip")
+        revision = _library_preview_key(lib, library_id)
         return {"id": int(library_id), "name": lib.names[library_id],
                 "family": lib.families[library_id],
                 "dataset": lib.datasets[library_id],
@@ -464,7 +1176,8 @@ def create_app() -> FastAPI:
                 "skin": ("neutral SMPL-X · exact source parameters"
                          if lib.source_motion(library_id) is not None else
                          "neutral SMPL-X · decoded 60-frame window"),
-                "url": f"/api/library/{library_id}/preview.webp"}
+                "url": (f"/api/library/{library_id}/preview.webp"
+                        f"?revision={revision}")}
 
     def _source_skin(library_id: int):
         lib = state["library"]
@@ -508,8 +1221,10 @@ def create_app() -> FastAPI:
         if library_id < 0 or library_id >= len(lib):
             raise HTTPException(404, "no such library clip")
         from ..paths import cache_dir
-        # v3 includes full source duration, source betas and hand articulation.
-        path = cache_dir() / "smplx_previews" / f"v3-{library_id}.webp"
+        # The library is rebuilt and reordered as Data Studio publishes data.
+        # A numeric library ID is therefore not a durable cache identity.
+        revision = _library_preview_key(lib, library_id)
+        path = cache_dir() / "smplx_previews" / f"v4-{revision}.webp"
         if not path.is_file():
             def work():
                 from ..viz.smplx_skin import animated_preview_webp
@@ -617,6 +1332,31 @@ def create_app() -> FastAPI:
                     "source_kind": kind}
         return await POOL.run(work)
 
+    @app.post("/api/source/contact-overlay")
+    async def source_contact_overlay(
+            library_id: int | None = Query(default=None, ge=0),
+            asset_id: str = Query(default="")):
+        """Show dynamic heel/forefoot labels on the active source preview."""
+        target_id = (data_studio_target_id(library_id)
+                     if library_id is not None else str(asset_id).strip())
+        labels = await _data_studio_contact_labels(target_id)
+        if not labels.get("contact"):
+            raise HTTPException(409, "foot-contact sidecar has no contact state")
+        try:
+            from ..viz.smplx_skin import sole_patch_indices
+            state["source_live"].set_skin_contact_overlay(
+                np.asarray(labels["contact"], np.uint8),
+                sole_patch_indices(POOL.device),
+                np.asarray(labels.get("contact_type"), np.uint8)
+                if labels.get("contact_type") is not None else None,
+                label_fps=float(labels.get("fps") or 0.0))
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        return {**state["source_live"].transport_state(),
+                "label": "foot_contact", "effectors": [
+                    "left_heel", "left_forefoot",
+                    "right_heel", "right_forefoot"]}
+
     @app.get("/api/source/transport")
     def source_transport():
         return state["source_live"].transport_state()
@@ -707,7 +1447,8 @@ def create_app() -> FastAPI:
         """Store a perception input under a server-controlled path.
 
         Timeline requests carry only the returned opaque filename. They can
-        never ask the GENMO subprocess to read an arbitrary host file.
+        never ask an external perception subprocess to read an arbitrary host
+        file.
         """
         suffix = Path(file.filename or "clip.mp4").suffix.lower()
         allowed = {".mp4", ".mov", ".mkv", ".webm", ".avi"}
@@ -732,11 +1473,24 @@ def create_app() -> FastAPI:
         if total == 0:
             path.unlink(missing_ok=True)
             raise HTTPException(422, "video upload is empty")
+        try:
+            from imageio_ffmpeg import count_frames_and_secs
+            source_frames, duration = count_frames_and_secs(str(path))
+            source_frames = int(source_frames)
+            duration = float(duration)
+            if source_frames < 1 or duration <= 0:
+                raise ValueError("no decodable video frames")
+            source_fps = source_frames / duration
+        except Exception as exc:
+            path.unlink(missing_ok=True)
+            raise HTTPException(
+                422, f"video metadata could not be decoded: {exc}") from exc
         with session() as s:
             s.add(Asset(kind="upload", path=str(path), bytes=total))
             s.commit()
         return {"asset": token, "name": Path(file.filename or token).name,
-                "bytes": total}
+                "bytes": total, "source_frames": source_frames,
+                "source_fps": source_fps, "duration_seconds": duration}
 
     # ---------------------------------------------------------- pipeline ----
     def _library_playback_codes(library_id: int):
@@ -762,6 +1516,54 @@ def create_app() -> FastAPI:
         while len(cache) > 3:
             cache.popitem(last=False)
         return codes
+
+    def _motion_playback_codes(motion_id: int):
+        """Encode a durable robot trace back into the shared motion space."""
+        cache = state["motion_codes"]
+        if motion_id in cache:
+            cache.move_to_end(motion_id)
+            return cache[motion_id]
+        with session() as s:
+            motion = s.get(Motion, motion_id)
+            if motion is None:
+                raise ValueError(f"no such motion: {motion_id}")
+            title, family, trace_path = (
+                motion.title, motion.family, Path(motion.trace_path))
+        if not trace_path.is_file():
+            raise ValueError(f"motion trace is missing: {trace_path.name}")
+        from ..embodiment import registry
+        from ..engine import constraints as MP
+        from ..engine.nets.rotations import matrix_to_rot6d
+        from ..engine.trace import MotionTrace
+        trace = MotionTrace.load(trace_path)
+        source_body = registry.load(trace.target)
+        gR, _gp = MP.fk_from_angles(
+            torch.as_tensor(trace.q, device=POOL.device, dtype=torch.float64),
+            source_body.spec,
+            torch.as_tensor(source_body.dof, device=POOL.device,
+                            dtype=torch.float64),
+            rest=torch.as_tensor(source_body.rest, device=POOL.device,
+                                 dtype=torch.float64),
+            root_R=torch.as_tensor(trace.rootR, device=POOL.device,
+                                   dtype=torch.float64))
+        pose9, _ = POOL.greenwich.pose9(
+            matrix_to_rot6d(gR).float().cpu(), source_body.spec,
+            is_global=True)
+        codes = torch.cat([
+            POOL.greenwich.encode(chunk, source_body.spec, source_body.dof)
+            .detach()
+            for chunk in pose9.split(MODEL_FRAME_BATCH)
+        ])
+        root = None
+        if trace.root_t is not None:
+            root = np.asarray(trace.root_t, np.float64)
+            root = root - root[:1]
+        value = (codes, title, family, root)
+        cache[motion_id] = value
+        cache.move_to_end(motion_id)
+        while len(cache) > 3:
+            cache.popitem(last=False)
+        return value
 
     def _rotation_matrix(wxyz) -> np.ndarray:
         if wxyz is None:
@@ -857,6 +1659,40 @@ def create_app() -> FastAPI:
             # then take the exact requested interval. If the user subsequently
             # changes this half's time budget, tokenize and retime only the cut
             # material instead of replaying the complete Library asset.
+            if seg.source_frames is not None:
+                start = seg.source_start
+                end = seg.source_end or seg.source_frames
+                codes = codes[start:end]
+                if root is not None:
+                    root = np.asarray(root)[start:end]
+            if seg.n != len(codes):
+                from ..engine.timeline import (interpolate_lattice,
+                                               resample_continuous)
+                source = codes
+                tokens, ep = eq.tokenize(source)
+                rot_codes = interpolate_lattice(source[:, 128:], seg.n)
+                boundary = torch.stack([source[0], source[-1]])
+                codes = eq.detokenize(tokens, ep, seg.n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+                if root is not None:
+                    root = resample_continuous(root, seg.n)
+            return codes, name, fam, root
+        if seg.kind == "motion":
+            codes, name, fam, root = _motion_playback_codes(seg.motion_id)
+            base_n = seg.source_frames or len(codes)
+            if base_n != len(codes):
+                from ..engine.timeline import (interpolate_lattice,
+                                               resample_continuous)
+                source = codes
+                tokens, ep = eq.tokenize(source)
+                rot_codes = interpolate_lattice(source[:, 128:], base_n)
+                boundary = torch.stack([source[0], source[-1]])
+                codes = eq.detokenize(tokens, ep, base_n,
+                                      boundary_codes=boundary,
+                                      rot_codes=rot_codes)
+                if root is not None:
+                    root = resample_continuous(root, base_n)
             if seg.source_frames is not None:
                 start = seg.source_start
                 end = seg.source_end or seg.source_frames
@@ -1299,6 +2135,11 @@ def create_app() -> FastAPI:
         if index < 0 or index >= len(lib):
             raise HTTPException(422, f"library_id must be in [0, {len(lib)-1}]")
 
+    def _require_motion_id(index: int):
+        with session() as s:
+            if s.get(Motion, index) is None:
+                raise HTTPException(404, f"no such motion: {index}")
+
     @app.post("/api/viewer/preview/library")
     async def preview_library_on_timeline(
             library_id: int = Query(ge=0),
@@ -1357,12 +2198,15 @@ def create_app() -> FastAPI:
         emb = _require_body(req.target_body)
         if not emb.xml or not Path(emb.xml).is_file():
             raise HTTPException(422, "selected body has no renderable mesh")
-        if any(seg.kind not in ("library", "gap") for seg in req.segments):
+        if any(seg.kind not in ("library", "motion", "gap")
+               for seg in req.segments):
             raise HTTPException(
                 422, "prompt and video segments must be generated before preview")
         for seg in req.segments:
             if seg.kind == "library":
                 _require_library_id(lib, seg.library_id)
+            elif seg.kind == "motion":
+                _require_motion_id(seg.motion_id)
         if req.segments[0].kind == "gap":
             raise HTTPException(422, "a bridge needs a clip on its left")
         cache_key = req.model_dump_json(exclude={"render", "se3", "title"})
@@ -1380,7 +2224,8 @@ def create_app() -> FastAPI:
                 root_path_locked = any(
                     seg.world_position_m is not None or
                     seg.world_end_position_m is not None
-                    for seg in req.segments if seg.kind == "library")
+                    for seg in req.segments
+                    if seg.kind in ("library", "motion"))
                 for seg in req.segments:
                     if seg.kind == "gap":
                         if not chunks:
@@ -1483,6 +2328,8 @@ def create_app() -> FastAPI:
         for seg in req.segments:
             if seg.kind == "library":
                 _require_library_id(lib, seg.library_id)
+            elif seg.kind == "motion":
+                _require_motion_id(seg.motion_id)
         if req.segments[0].kind == "gap" or req.segments[-1].kind == "gap":
             raise HTTPException(422, "a bridge needs clips on both sides")
         if any(a.kind == b.kind == "gap"
@@ -1713,7 +2560,7 @@ def create_app() -> FastAPI:
             video = (root / Path(seg.video_asset).name).resolve()
             if not video.is_relative_to(root) or not video.is_file():
                 raise ValueError("video asset is not a registered upload")
-            rot6d, root_t = motion_from_video(str(video))
+            rot6d, root_t = motion_from_video(str(video), seg.n)
         p9, _ = gw.pose9(rot6d, hspec, is_global=True)
         return gw.encode(p9.to(POOL.device), hspec, hdof), root_t
 

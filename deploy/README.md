@@ -13,10 +13,13 @@ Large environments, caches, models, and robot assets live under
 `/media/sajio/New Volume/CodexDeployments/Greenwich`; the source checkout stays
 on the system disk. `deploy/env.sh` contains the runtime configuration.
 
-GENMO/GEM is installed in its own Python 3.10 environment with GEM-SMPL,
-T5-3B, HMR2, ViTPose, SMPL-X and the GVHMR body-model support files. The
-reference video is the official GVHMR single-person tennis example.
+Motion perception runs in a separate Python environment. Both Add a Motion
+(text) and Upload Video to Generate use GENMO and return the same global
+SMPL-22 rotations and root-trajectory contract consumed by the Greenwich
+retargeter.
 
-The local GENMO checkout contains compatibility fixes found during end-to-end
-testing: canonical T5 cache routing, missing GVHMR support assets, and proper
-video-only handling when no text segment is present.
+The deployment expects an official GENMO checkout at `sources/GENMO` and its
+environment at `envs/genmo`. Configure the exact paths through
+`ALPHAMOTION_GENMO_REPO` and `ALPHAMOTION_GENMO_PYTHON`. Text generation also
+requires a short camera/reference clip at the AlphaMotion cache path
+`genmo_reference.mp4`. AlphaMotion does not bundle or re-host GENMO weights.

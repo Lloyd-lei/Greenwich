@@ -39,6 +39,12 @@ def doctor():
     from .weights import status
     for k, ok in status().items():
         rows.append((f"weights/{k}", "ok" if ok else "not downloaded"))
+    from .perception.genmo import status as perception_status
+    perception = perception_status()
+    rows.append(("perception/text", "ok (GENMO)" if perception["text"]
+                 else "not configured"))
+    rows.append(("perception/video", "ok (GENMO)" if perception["video"]
+                 else "not configured"))
     rows.append(("cache", str(cache_dir())))
     rows.append(("data", str(data_dir())))
     rows.append(("db", str(db_path())))
@@ -54,15 +60,16 @@ def doctor():
 
 @app.command()
 def download(third_party: bool = typer.Option(False, "--third-party",
-                                              help="also fetch GENMO/T5")):
+                                              help="show perception setup")):
     """Fetch model weights from the HF hub (first run)."""
     from .weights import download_all
     out = download_all()
     for k, v in out.items():
         typer.echo(f"  {k}: {v}")
     if third_party:
-        typer.echo("third-party perception weights are fetched by the GENMO "
-                   "adapter on first use (see docs/SDK.md)")
+        typer.echo("Text/video perception uses the separately installed GENMO "
+                   "checkout. Configure ALPHAMOTION_GENMO_REPO and "
+                   "ALPHAMOTION_GENMO_PYTHON; see deploy/README.md.")
 
 
 @app.command()

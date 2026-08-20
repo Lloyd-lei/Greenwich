@@ -24,8 +24,9 @@ python scripts/browser_acceptance.py \
 - temporal clip retiming, sampled gaps, seed, temperature and token pins;
 - root and non-root SE(3) constraints with task-space residual checks;
 - generated-frame hold and projection-branch repair;
-- optional GENMO text-to-SMPL integration, including retained world-root
-  translation and QC-failed sample isolation from Atlas Memory;
+- optional GENMO text-to-motion and video-to-SMPL integration, including
+  retained world-root translation and QC-failed sample isolation from Atlas
+  Memory;
 - Atlas portal lookup and executable bridge generation;
 - synergy and kinematic-continuity gates;
 - Viser camera framing, atomic mesh/camera playback, dynamic flash detection,

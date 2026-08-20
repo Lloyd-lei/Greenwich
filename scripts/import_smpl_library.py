@@ -67,6 +67,31 @@ def _fps(data) -> float:
 
 
 def _motion(data) -> dict[str, np.ndarray | float | int | str]:
+    # AlphaMotion-native SMPL assets (including GENMO Data Studio results)
+    # already use the audited local-rotation/Y-up contract.  Accept them
+    # directly so sharing does not round-trip through lossy axis-angle files.
+    if "local_rot6d" in data and "root_cm" in data:
+        local6d = np.asarray(data["local_rot6d"], np.float32)
+        root = np.asarray(data["root_cm"], np.float32)
+        if local6d.ndim != 3 or local6d.shape[1:] != (SMPL_JOINTS, 6):
+            raise ValueError("local_rot6d must be [T,22,6]")
+        if root.shape != (len(local6d), 3) or len(local6d) < 1:
+            raise ValueError("root_cm must be [T,3] with at least one frame")
+        if not np.isfinite(local6d).all() or not np.isfinite(root).all():
+            raise ValueError("motion contains NaN or infinity")
+        hands = np.asarray(data["hand_pose"], np.float32) \
+            if "hand_pose" in data else np.zeros((len(local6d), 90), np.float32)
+        if hands.shape != (len(local6d), 90):
+            hands = np.zeros((len(local6d), 90), np.float32)
+        betas = np.asarray(data["betas"], np.float32).reshape(-1)[:10] \
+            if "betas" in data else np.zeros(10, np.float32)
+        if len(betas) < 10:
+            betas = np.pad(betas, (0, 10 - len(betas)))
+        family = "smplh" if ("model_family" in data and int(
+            np.asarray(data["model_family"]).reshape(()))) else "smpl"
+        return {"local_rot6d": local6d, "root_cm": root,
+                "hand_pose": hands, "betas": betas, "gender": "neutral",
+                "model_family": family, "source_fps": _fps(data)}
     poses = np.asarray(data["poses"], np.float64)
     trans = np.asarray(data["trans"], np.float64)
     if poses.ndim != 2 or poses.shape[1] < SMPL_JOINTS * 3:

@@ -20,6 +20,27 @@ def test_segment_contracts():
     with pytest.raises(ValidationError):
         Segment(kind="gap", n=20, source_frames=60,
                 source_start=10, source_end=30)
+    motion = Segment(kind="motion", motion_id=85, n=30,
+                     source_frames=60, source_start=10, source_end=40)
+    assert motion.motion_id == 85
+    assert (motion.source_start, motion.source_end) == (10, 40)
+    with pytest.raises(ValidationError):
+        Segment(kind="motion", n=30)
+    with pytest.raises(ValidationError):
+        Segment(kind="video", video_asset="clip.mp4", n=120,
+                duration_seconds=10.0)
+    with pytest.raises(ValidationError):
+        Segment(kind="prompt", text="walk", n=120,
+                source_video_frames=300, source_video_fps=30.0,
+                duration_seconds=10.0)
+
+
+def test_video_duration_controls_timeline_frames():
+    video = Segment(kind="video", video_asset="clip.mp4", n=120,
+                    source_video_frames=600, source_video_fps=60.0,
+                    duration_seconds=10.0)
+    request = TimelineRequest(segments=[video], fps=30.0)
+    assert request.segments[0].n == 300
 
 
 def test_segment_world_transform_contracts():

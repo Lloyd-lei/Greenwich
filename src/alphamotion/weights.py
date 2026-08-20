@@ -3,9 +3,8 @@
 Our HF repo carries ONLY AlphaMotion's own weights and curated motion assets.
 The complete core download is roughly 1 GB because native playback requires
 the lossless packed dual-stream code library in addition to model weights.
-Big third-party
-models (GENMO perception, T5) stay at their original sources and download on
-first use — cleaner licensing, small repo.
+Big third-party models (GENMO perception and T5) stay at their original
+sources and download on first use — cleaner licensing, small repo.
 """
 from __future__ import annotations
 

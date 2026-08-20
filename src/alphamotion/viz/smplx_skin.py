@@ -20,12 +20,16 @@ _MODEL_LOCK = threading.RLock()
 
 
 def model_path() -> Path:
-    path = Path(CONFIG.genmo_repo) / "inputs/checkpoints/body_models"
-    expected = path / "smplx" / "SMPLX_NEUTRAL.npz"
-    if not expected.is_file():
-        raise FileNotFoundError(
-            "SMPL-X neutral body model is missing: " + str(expected))
-    return path
+    roots = [CONFIG.gvhmr_repo, CONFIG.genmo_repo]
+    for root in roots:
+        if not root:
+            continue
+        path = Path(root) / "inputs/checkpoints/body_models"
+        if (path / "smplx" / "SMPLX_NEUTRAL.npz").is_file():
+            return path
+    raise FileNotFoundError(
+        "SMPL-X neutral body model is missing from the configured motion "
+        "perception assets")
 
 
 @lru_cache(maxsize=2)
@@ -35,6 +39,68 @@ def _model(device: str):
         str(model_path()), model_type="smplx", gender="neutral",
         num_betas=10, use_pca=False, flat_hand_mean=True)
     return body.to(device).eval()
+
+
+@lru_cache(maxsize=2)
+def sole_patch_indices(device: str = "cpu") -> tuple[np.ndarray, ...]:
+    """Return left/right heel and forefoot vertex patches for SMPL-X.
+
+    The contact labels describe state, while the rendered SMPL-X surface is
+    the authority for spatial placement.  Deriving patches from the neutral
+    rest mesh keeps markers attached even when the source SMPL-H translation,
+    body shape, or floor normalization differs from the preview.
+    """
+    body = _model(device)
+    with _MODEL_LOCK, torch.inference_mode():
+        shaped = body(
+            betas=torch.zeros(
+                (1, body.num_betas), device=device,
+                dtype=body.shapedirs.dtype),
+            return_verts=True)
+    vertices = shaped.vertices[0].detach().cpu().numpy()
+    joints = shaped.joints[0].detach().cpu().numpy()
+    patches: list[np.ndarray] = []
+    for ankle_index, forefoot_index in ((7, 10), (8, 11)):
+        ankle, forefoot = joints[ankle_index], joints[forefoot_index]
+        side = 1.0 if forefoot[0] >= 0 else -1.0
+        low_forward = min(ankle[2], forefoot[2]) - 0.10
+        high_forward = max(ankle[2], forefoot[2]) + 0.10
+        candidates = np.flatnonzero(
+            (vertices[:, 0] * side > 0.025)
+            & (np.abs(vertices[:, 0] - forefoot[0]) < 0.12)
+            & (vertices[:, 1] < min(ankle[1], forefoot[1]) + 0.025)
+            & (vertices[:, 2] >= low_forward)
+            & (vertices[:, 2] <= high_forward))
+        split = float((ankle[2] + forefoot[2]) * 0.5)
+        regions = (
+            candidates[vertices[candidates, 2] <= split],
+            candidates[vertices[candidates, 2] > split],
+        )
+        for region in regions:
+            if len(region) < 6:
+                raise ValueError("SMPL-X heel/forefoot patch is too small")
+            count = min(32, max(8, len(region) // 2))
+            patches.append(np.asarray(
+                region[np.argsort(vertices[region, 1])[:count]], np.int64))
+    return tuple(patches)
+
+
+def sole_positions_from_skin(
+        vertices: np.ndarray,
+        patches: tuple[np.ndarray, ...]) -> np.ndarray:
+    """Calculate four frame-aligned sole positions on a rendered skin."""
+    skin = np.asarray(vertices)
+    if skin.ndim != 3 or skin.shape[-1] != 3:
+        raise ValueError("SMPL-X skin vertices must have shape [T,V,3]")
+    if len(patches) != 4:
+        raise ValueError("foot contact requires four SMPL-X sole patches")
+    positions = []
+    for patch in patches:
+        indices = np.asarray(patch, np.int64).reshape(-1)
+        if not len(indices) or indices.min() < 0 or indices.max() >= skin.shape[1]:
+            raise ValueError("SMPL-X sole patch contains invalid vertices")
+        positions.append(np.asarray(skin[:, indices], np.float32).mean(axis=1))
+    return np.stack(positions, axis=1)
 
 
 def skin_global_rot6d(rot6d, parents, root_cm=None, hand_pose=None,

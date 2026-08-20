@@ -18,6 +18,7 @@ import numpy as np
 import torch
 
 from ..config import CONFIG
+from ..engine.nets.rotations import matrix_to_rot6d, rot6d_to_matrix
 from ..paths import cache_dir
 
 SMPL_PARENTS = [-1, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 9, 9, 12, 13, 14,
@@ -30,8 +31,10 @@ def status() -> dict:
     repo = Path(CONFIG.genmo_repo) if CONFIG.genmo_repo else None
     script = repo / "scripts" / "demo" / "demo_smpl.py" if repo else None
     reference = cache_dir() / "genmo_reference.mp4"
-    ready = bool(python and python.is_file() and script and script.is_file()
-                 and reference.is_file())
+    core_ready = bool(python and python.is_file() and script and
+                      script.is_file())
+    text_ready = core_ready and reference.is_file()
+    video_ready = core_ready
     missing = []
     if not python or not python.is_file():
         missing.append("python")
@@ -39,12 +42,17 @@ def status() -> dict:
         missing.append("repo")
     if not reference.is_file():
         missing.append("reference_video")
-    return {"ready": ready, "missing": missing}
+    return {"ready": text_ready or video_ready,
+            "text": text_ready,
+            "video": video_ready,
+            "backend": "GENMO",
+            "missing": missing}
 
 
-def _require_env():
+def _require_env(*, needs_reference: bool = False):
     probe = status()
-    if not probe["ready"]:
+    capability = "text" if needs_reference else "video"
+    if not probe[capability]:
         raise RuntimeError(
             "GENMO perception is not configured. Install GENMO in its own "
             "environment, then set ALPHAMOTION_GENMO_PYTHON=<env>/bin/python "
@@ -110,8 +118,23 @@ def smpl_root_translation(smpl_params: dict,
     return root.astype(np.float64, copy=False)
 
 
-def _run_genmo(inputs: list[str], text_len: int) -> dict:
-    _require_env()
+def global_to_local_rot6d(global_rot6d: torch.Tensor) -> torch.Tensor:
+    """Convert GENMO's composed SMPL rotations back to local joint rotations.
+
+    Data Studio's portable SMPL asset contract stores local rotations; the
+    timeline adapter deliberately consumes the composed form above.
+    """
+    global_R = rot6d_to_matrix(global_rot6d)
+    local_R = global_R.clone()
+    for joint, parent in enumerate(SMPL_PARENTS):
+        if parent >= 0:
+            local_R[:, joint] = global_R[:, parent].transpose(-1, -2) @ global_R[:, joint]
+    return matrix_to_rot6d(local_R).float()
+
+
+def _run_genmo(inputs: list[str], text_len: int,
+               *, needs_reference: bool = False) -> dict:
+    _require_env(needs_reference=needs_reference)
     staging = cache_dir() / "genmo_staging"
     staging.mkdir(parents=True, exist_ok=True)
     cmd = [CONFIG.genmo_python, "scripts/demo/demo_smpl.py",
@@ -143,12 +166,32 @@ def reference_video() -> Path:
 def motion_from_prompt(text: str, seconds: float = 5.0
                        ) -> tuple[torch.Tensor, np.ndarray]:
     frames = max(30, int(seconds * 30))
-    art = _run_genmo([str(reference_video()), f"text:{text}"], frames)
+    art = _run_genmo([str(reference_video()), f"text:{text}"], frames,
+                     needs_reference=True)
     return (smpl_to_global_rot6d(art, segment="text"),
             smpl_root_translation(art, segment="text"))
 
 
-def motion_from_video(video_path: str) -> tuple[torch.Tensor, np.ndarray]:
+def _resample(rot6d: torch.Tensor, root: np.ndarray,
+              frames: int) -> tuple[torch.Tensor, np.ndarray]:
+    """Resample GENMO output to the 30 FPS timeline contract when requested."""
+    frames = max(1, int(frames))
+    if len(rot6d) == frames:
+        return rot6d, root
+    x = rot6d.permute(1, 2, 0).reshape(1, -1, len(rot6d))
+    x = torch.nn.functional.interpolate(
+        x, size=frames, mode="linear", align_corners=True)
+    out = x.reshape(22, 6, frames).permute(2, 0, 1)
+    out = matrix_to_rot6d(rot6d_to_matrix(out)).float()
+    src = np.linspace(0.0, 1.0, len(root))
+    dst = np.linspace(0.0, 1.0, frames)
+    root_out = np.stack([np.interp(dst, src, root[:, axis])
+                         for axis in range(3)], axis=1)
+    return out, root_out.astype(np.float64)
+
+
+def motion_from_video(video_path: str, frames: int | None = None
+                      ) -> tuple[torch.Tensor, np.ndarray]:
     src = Path(video_path)
     if not src.is_file():
         raise RuntimeError(f"video not found: {src}")
@@ -157,4 +200,5 @@ def motion_from_video(video_path: str) -> tuple[torch.Tensor, np.ndarray]:
     if not staged.exists():
         shutil.copy2(src, staged)
     art = _run_genmo([str(staged)], 60)
-    return smpl_to_global_rot6d(art), smpl_root_translation(art)
+    rot, root = smpl_to_global_rot6d(art), smpl_root_translation(art)
+    return _resample(rot, root, frames) if frames is not None else (rot, root)
